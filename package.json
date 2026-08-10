@@ -1,0 +1,37 @@
+{
+  "name": "mps-ai",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MY PT STUDIO AI Platform — intelligence layer. The ERP backend remains the authority.",
+  "main": "src/server.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "lint": "eslint src __tests__"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.22.1",
+    "express-rate-limit": "^7.4.1",
+    "helmet": "^7.2.0",
+    "pino": "^10.3.1",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "eslint": "^9.15.0",
+    "jest": "^29.7.0",
+    "supertest": "^7.0.0"
+  },
+  "jest": {
+    "testEnvironment": "node",
+    "testMatch": [
+      "**/__tests__/**/*.test.js"
+    ],
+    "clearMocks": true
+  }
+}
