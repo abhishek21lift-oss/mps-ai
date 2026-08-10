@@ -1,0 +1,47 @@
+# Paste this `ai` service into the compose file that actually runs on the VPS:
+#
+#   /opt/myptstudio/619-erp-backend/docker-compose.yml
+#
+# It is a SNIPPET, not a standalone file — the AI service belongs on the same
+# compose network as the API so it can reach it as `http://api:5000` without
+# leaving the box. Running it in its own compose project would put it on a
+# separate network and force the ERP call out through nginx and back, adding a
+# TLS round trip and a public hop for traffic that never needs to leave the host.
+#
+# Follow the same rule the backend's own compose file states: the live file is
+# on the box and may already differ. Diff before pasting.
+
+services:
+  ai:
+    build: /opt/myptstudio/mps-ai        # adjust to wherever you clone it
+    restart: unless-stopped
+    # Loopback only, exactly like `api` and the frontend. nginx is the only
+    # route in. Do not "fix" a connection problem by binding 0.0.0.0.
+    ports:
+      - '127.0.0.1:4100:4100'
+    environment:
+      NODE_ENV: production
+      PORT: '4100'
+      LOG_LEVEL: ${AI_LOG_LEVEL:-info}
+
+      AI_PROVIDER: openrouter
+      # Reuse the key the ERP already uses — one OpenRouter account, one bill.
+      AI_API_KEY: ${OPENROUTER_API_KEY}
+      AI_PRIMARY_MODEL: ${AI_PRIMARY_MODEL:-openai/gpt-oss-120b:free}
+      AI_FALLBACK_MODEL: ${AI_FALLBACK_MODEL:-nvidia/nemotron-3-ultra-550b-a55b:free}
+
+      # `api` is the service name on the compose network. Container-to-container,
+      # so this never touches nginx or the public internet.
+      ERP_BACKEND_URL: http://api:5000
+      SERVICE_AUTH_SECRET: ${SERVICE_AUTH_SECRET}
+
+      # Exact origins. The browser calls this service directly, so this must
+      # list the frontend's real scheme+host.
+      ALLOWED_ORIGINS: ${AI_ALLOWED_ORIGINS}
+      RATE_LIMIT_MAX: ${AI_RATE_LIMIT_MAX:-30}
+
+      # NOTE: no DATABASE_URL and no JWT_SECRET here, and adding them will make
+      # the container refuse to start. That is deliberate — see src/config.js.
+    depends_on:
+      api:
+        condition: service_started
