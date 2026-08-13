@@ -49,13 +49,41 @@ const Schema = z.object({
   // Both are required; neither is sufficient alone.
   SERVICE_AUTH_SECRET: z.string().min(32, 'SERVICE_AUTH_SECRET must be at least 32 characters'),
 
+  // ── Studio time ───────────────────────────────────────────────────────────
+  // "This month" and "expiring soon" are answered against a calendar, and the
+  // studio's calendar is not the server's. Without this the model falls back to
+  // whatever it believes today is — which is its training cutoff, stated as
+  // fact. Validated below against the real IANA database rather than trusted.
+  STUDIO_TIMEZONE: z.string().min(1).default('Asia/Kolkata'),
+
+  // ── Budgets ───────────────────────────────────────────────────────────────
+  // A client with four years of attendance must not be able to build an
+  // unbounded prompt. maxTokens caps the completion; nothing capped the input.
+  MAX_TOOL_RESULT_CHARS: z.coerce.number().int().positive().default(6_000),
+  MAX_CONTEXT_CHARS: z.coerce.number().int().positive().default(24_000),
+
   // ── HTTP ──────────────────────────────────────────────────────────────────
   // Comma-separated. No wildcard default: an authenticated API that reflects
   // any origin is a credential-forwarding hole, and §47 rules it out.
   ALLOWED_ORIGINS: z.string().default(''),
   RATE_LIMIT_WINDOW_MS: z.coerce.number().int().positive().default(60_000),
   RATE_LIMIT_MAX: z.coerce.number().int().positive().default(30),
+  // Per-IP backstop. The token-keyed limiter runs before authentication, so a
+  // caller presenting a fresh junk token each time gets a fresh bucket each
+  // time. Those requests 401 without touching the ERP or a model, but nothing
+  // bounded their rate. This does. Set well above RATE_LIMIT_MAX so a whole
+  // studio behind one NAT is not throttled as though it were one person.
+  RATE_LIMIT_IP_MAX: z.coerce.number().int().positive().default(120),
 });
+
+/** Reject a timezone at boot rather than every time a date is formatted. */
+function assertValidTimeZone(tz) {
+  try {
+    new Intl.DateTimeFormat('en-CA', { timeZone: tz });
+  } catch {
+    throw new Error(`STUDIO_TIMEZONE is not a valid IANA timezone: ${tz}`);
+  }
+}
 
 /**
  * Secrets that must never reach this process. Presence means someone copied the
@@ -101,7 +129,15 @@ function load(env = process.env) {
     throw new Error('ALLOWED_ORIGINS must not contain "*" — this API is authenticated.');
   }
 
+  assertValidTimeZone(cfg.STUDIO_TIMEZONE);
+
+  if (cfg.MAX_TOOL_RESULT_CHARS > cfg.MAX_CONTEXT_CHARS) {
+    throw new Error('MAX_TOOL_RESULT_CHARS must not exceed MAX_CONTEXT_CHARS.');
+  }
+
   return Object.freeze({ ...cfg, allowedOrigins });
 }
 
-module.exports = { load, Schema, FORBIDDEN, assertNoForbiddenSecrets };
+module.exports = {
+  load, Schema, FORBIDDEN, assertNoForbiddenSecrets, assertValidTimeZone,
+};

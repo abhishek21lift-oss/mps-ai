@@ -25,7 +25,7 @@
 const { planTools, planIntent } = require('./planner');
 const { systemPrompt } = require('./prompt');
 const { run: runTool } = require('../../platform/tools/registry');
-const { newFenceId, buildContextBlock, neutralise } = require('../../platform/context/untrusted');
+const { newFenceId, buildContext, neutralise } = require('../../platform/context/untrusted');
 const logger = require('../../lib/logger');
 
 /** How many prior turns to replay. Enough for "what about his attendance?"; not
@@ -60,11 +60,18 @@ function buildMessages({ system, contextBlock, history, question }) {
   // it is neutralised, because an earlier turn may have quoted a malicious
   // note verbatim, and replaying that quote unfenced would smuggle it back in
   // outside the fence that contained it the first time.
+  //
+  // neutralise() is called with ONE argument on purpose. Passing '' as a fence
+  // id used to compile `new RegExp('', 'g')`, which matches the empty string at
+  // every position and inserted the replacement between every character —
+  // shredding each replayed turn and inflating history tokens roughly
+  // sixteen-fold. There is no per-request fence to strip from history, so there
+  // is no id to pass.
   for (const turn of history.slice(-HISTORY_TURNS)) {
     if (turn.role === 'user') {
       messages.push({ role: 'user', content: String(turn.content).slice(0, 4000) });
     } else if (turn.role === 'assistant') {
-      messages.push({ role: 'assistant', content: neutralise(String(turn.content).slice(0, 4000), '') });
+      messages.push({ role: 'assistant', content: neutralise(String(turn.content).slice(0, 4000)) });
     }
   }
 
@@ -73,7 +80,17 @@ function buildMessages({ system, contextBlock, history, question }) {
   return messages;
 }
 
-function createClientAgent({ erp, router }) {
+/** No clock configured — used only by tests that predate the studio clock. */
+const NULL_CLOCK = { describe: () => null, today: () => null };
+const NULL_AUDIT = { request() {}, tool() {}, denied() {}, actor: () => 'unknown' };
+
+function createClientAgent({
+  erp,
+  router,
+  clock = NULL_CLOCK,
+  audit = NULL_AUDIT,
+  budget,
+}) {
   /**
    * @param {object} req
    * @param {string} req.clientId    From the browser. Untrusted until authorised.
@@ -84,14 +101,31 @@ function createClientAgent({ erp, router }) {
    */
   async function ask({ clientId, message, history = [], userToken, requestId }) {
     const started = Date.now();
+    const actor = audit.actor(userToken);
 
     // 1. Authorise. Nothing else happens until this passes.
     const auth = await authoriseClient({ clientId, erp, userToken, requestId });
     if (!auth.ok) {
       logger.info({ requestId, code: auth.code }, 'client_agent_denied');
+
+      // Statuses are distinct answers: 400 malformed, 401 expired session,
+      // 404 not yours, 403 refused. Collapsing them loses the only part a
+      // frontend can act on.
+      const status = auth.status
+        || (auth.code === 'NOT_FOUND' ? 404 : auth.code === 'BAD_ARGS' ? 400 : 403);
+
+      audit.denied({
+        requestId, actor, clientId, tool: 'getClientProfile', code: auth.code, status,
+      });
+      audit.request({
+        requestId, actor, agent: 'client', clientId,
+        outcome: 'denied', code: auth.code, status,
+        latencyMs: Date.now() - started,
+      });
+
       return {
         ok: false,
-        status: auth.status || (auth.code === 'NOT_FOUND' ? 404 : 403),
+        status,
         code: auth.code,
         message: auth.message,
         toolsUsed: [],
@@ -117,15 +151,37 @@ function createClientAgent({ erp, router }) {
     const okResults = results.filter((r) => r.ok);
     const failed = results.filter((r) => !r.ok);
 
-    // 4. Fence, then prompt.
+    for (const r of results) {
+      audit.tool({
+        requestId,
+        actor,
+        tool: r.tool,
+        args: { clientId },
+        ok: r.ok,
+        code: r.code ?? null,
+        status: r.status ?? null,
+        resultChars: r.chars ?? null,
+        latencyMs: r.latency_ms ?? null,
+      });
+      if (!r.ok && (r.status === 403 || r.status === 404)) {
+        audit.denied({ requestId, actor, clientId, tool: r.tool, code: r.code, status: r.status });
+      }
+    }
+
+    // 4. Fence, then prompt. The budget is applied here rather than at the
+    //    provider, so what gets dropped is chosen by us and announced to the
+    //    model — not silently cut off by a context-window error.
     const fenceId = newFenceId();
-    const contextBlock = buildContextBlock(
+    const context = buildContext(
       okResults.map((r) => ({ label: r.label, tool: r.tool, data: r.data })),
       fenceId,
+      budget,
     );
+    const contextBlock = context.text;
 
     const system = systemPrompt({
       clientName: auth.name,
+      now: clock.describe(),
       toolsRun: okResults.map((r) => r.tool),
       toolsFailed: failed.map((r) => r.tool),
     });
@@ -138,6 +194,12 @@ function createClientAgent({ erp, router }) {
       completion = await router.chat({ intent, messages });
     } catch (err) {
       logger.error({ requestId, code: err.code }, 'client_agent_model_failed');
+      audit.request({
+        requestId, actor, agent: 'client', clientId, intent,
+        outcome: 'failed', code: err.code || 'MODEL_FAILED', status: err.status || 503,
+        toolsOk: okResults.length, toolsFailed: failed.length,
+        latencyMs: Date.now() - started,
+      });
       return {
         ok: false,
         status: err.status || 503,
@@ -158,6 +220,25 @@ function createClientAgent({ erp, router }) {
       tokens: completion.usage.prompt + completion.usage.completion,
       latency_ms: elapsed,
     }, 'client_agent_answered');
+
+    audit.request({
+      requestId,
+      actor,
+      agent: 'client',
+      clientId,
+      intent,
+      outcome: 'answered',
+      status: 200,
+      toolsOk: okResults.length,
+      toolsFailed: failed.length,
+      model: completion.model,
+      usedFallback: completion.used_fallback,
+      tokens: completion.usage,
+      contextChars: context.usedChars,
+      truncatedTools: context.truncated,
+      droppedTools: context.dropped,
+      latencyMs: elapsed,
+    });
 
     return {
       ok: true,

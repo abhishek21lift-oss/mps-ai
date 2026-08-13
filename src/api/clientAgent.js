@@ -12,7 +12,13 @@ const crypto = require('node:crypto');
 const logger = require('../lib/logger');
 
 const Body = z.object({
-  clientId: z.string().trim().min(1).max(64),
+  // The same shape the tool registry enforces. Validating it here too means a
+  // malformed id is a clean 400 at the edge rather than surfacing later as a
+  // tool-level failure that reads like a permissions problem. The registry
+  // keeps its own copy regardless — it is the enforcement point, and a check
+  // that only exists at the edge is one refactor away from not existing.
+  clientId: z.string().trim().min(1).max(64)
+    .regex(/^[A-Za-z0-9_-]+$/, 'clientId must be an opaque id'),
   message: z.string().trim().min(1, 'message is required').max(2000),
   history: z.array(z.object({
     role: z.enum(['user', 'assistant']),

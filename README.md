@@ -132,8 +132,13 @@ to a model provider.
   "requestId": "…" }
 ```
 
-`401` no token · `403` not authorised · `404` no such client *in your studio* ·
-`429` rate limited · `503` all models failed.
+`400` malformed request · `401` no token, or session expired · `403` not
+authorised · `404` no such client *in your studio* · `429` rate limited ·
+`503` all models failed.
+
+These stay distinct on purpose: only some are the caller's to fix, and
+collapsing "your session expired" into "not authorised" sends a frontend author
+hunting a permissions bug that does not exist.
 
 `proposedAction` is always `null` in Phase 1 — the field exists so the
 confirm-before-write contract has a shape from day one and adding a write is
@@ -153,15 +158,78 @@ npm run dev
 ```
 
 ```bash
-npm test        # 19 security + behaviour tests
+npm test        # 94 security + behaviour tests
 npm run lint
 ```
+
+| Suite | Covers |
+|---|---|
+| `security.test.js` | tenancy, closed tool surface, injection fencing, read-only |
+| `grounding.test.js` | history is not evidence; no-records ≠ no-data; history integrity |
+| `dates.test.js` | studio-timezone civil dates and named ranges |
+| `limits.test.js` | context budget, truncation, and announcing both |
+| `audit.test.js` | the trail is complete, and holds no secrets or records |
+| `errors.test.js` | 400/401/403/404 stay distinct; no internals leak; rate limits |
+
+## Grounding
+
+Three cases the agent must not conflate, enforced in the prompt and covered by
+`grounding.test.js`:
+
+1. **The data answers it** — give the figure and its date.
+2. **Retrieved, but empty** — "no matching records were found". An empty list is
+   not a zero to reason from.
+3. **Not retrievable at all** — "I don't have that information in the available
+   studio data." Never answered from general knowledge.
+
+Conversation history is supplied by the caller, so it is **not evidence**. Every
+factual claim is re-grounded on the data retrieved for the current question; a
+user asserting "my studio has 500 clients" is a claim, never a source (§34).
+
+## Dates
+
+The model is told the studio's current date, weekday and timezone on every
+request (`STUDIO_TIMEZONE`, default `Asia/Kolkata`). Without that, "expiring
+soon" is answered against the model's training cutoff and presented as though it
+came from the studio's records.
+
+Ranges are **civil dates** (`2026-08-01`..`2026-08-31`), not UTC instants —
+that is what a business question means, what the ERP filters on, and it
+sidesteps DST entirely. Weeks start Monday. An unrecognised range resolves to
+`null` rather than a guess, because inventing a default window is how "revenue"
+silently becomes "revenue this month".
+
+## Budgets
+
+`maxTokens` caps the reply; `MAX_TOOL_RESULT_CHARS` and `MAX_CONTEXT_CHARS` cap
+what enters the prompt, so a client with four years of attendance cannot set the
+request size. Anything cut is **announced inside its own fence** — a truncated
+list the model believes is complete becomes a confident, precise, wrong total.
+
+## Audit trail
+
+Separate from operational logging, and tagged `audit: true` for routing to
+longer retention. Records actor, client id, tool, arguments, outcome, status,
+model, tokens and latency. Refusals log at `warn`, so one actor probing many
+client ids is visible without a query.
+
+The actor is an **HMAC of the bearer token** keyed with `SERVICE_AUTH_SECRET` —
+stable enough to correlate a session, non-reversible, and rotating with the
+secret. This service cannot log a real `user_id`: the ERP's JWT carries no
+authorisation claims and there is no key here to verify it with, so decoding it
+would mean logging whatever an attacker put in an unverified token. Joining
+`actor` back to a user is done against the ERP's own request log — the only
+party that ever knew the answer.
+
+Never recorded: the token, the question text, tool results, or the model's
+answer.
 
 ## Environment
 
 See `.env.example`. Required: `AI_API_KEY`, `ERP_BACKEND_URL`,
 `SERVICE_AUTH_SECRET` (≥32 chars, `openssl rand -base64 48`), and
-`ALLOWED_ORIGINS` in production.
+`ALLOWED_ORIGINS` in production. Optional: `STUDIO_TIMEZONE`,
+`MAX_TOOL_RESULT_CHARS`, `MAX_CONTEXT_CHARS`, `RATE_LIMIT_IP_MAX`.
 
 **Refused at boot:** `JWT_SECRET`, `DATABASE_URL`,
 `SUPABASE_SERVICE_ROLE_KEY` — see "the two properties" above.

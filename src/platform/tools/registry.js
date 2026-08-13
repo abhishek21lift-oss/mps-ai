@@ -134,9 +134,13 @@ async function run({ name, args, erp, userToken, requestId }) {
 
   const parsed = tool.args.safeParse(args || {});
   if (!parsed.success) {
+    // 400, not 403. A malformed id is the caller's mistake, and reporting it as
+    // an authorisation failure sends a frontend author looking for a permission
+    // problem that does not exist.
     return {
       ok: false,
       tool: name,
+      status: 400,
       code: 'BAD_ARGS',
       message: parsed.error.issues.map((i) => i.message).join('; '),
     };
@@ -144,18 +148,38 @@ async function run({ name, args, erp, userToken, requestId }) {
 
   try {
     const { data, latency_ms } = await erp.get(tool.endpoint(parsed.data), { userToken, requestId });
-    return { ok: true, tool: name, label: tool.label, data, latency_ms };
+    return {
+      ok: true,
+      tool: name,
+      label: tool.label,
+      data,
+      latency_ms,
+      // Recorded for the audit trail and the context budget. Cheap here, and
+      // the alternative is re-serialising the same payload downstream.
+      chars: typeof data === 'string' ? data.length : JSON.stringify(data ?? null).length,
+    };
   } catch (err) {
+    // 401 and 403 are different answers and must not be flattened into one.
+    // "Your session expired, sign in again" and "you may not see this client"
+    // call for different things from the person reading them, and only the
+    // first is fixable by the user.
+    let message;
+    if (err.status === 404) {
+      message = 'Not found, or not visible to you.';
+    } else if (err.status === 401) {
+      message = 'Your session has expired. Please sign in again.';
+    } else if (err.status === 403) {
+      message = 'You are not authorised to see this.';
+    } else {
+      message = 'That information could not be retrieved right now.';
+    }
+
     return {
       ok: false,
       tool: name,
-      code: err.code || 'TOOL_FAILED',
+      code: err.status === 401 ? 'UNAUTHENTICATED' : (err.code || 'TOOL_FAILED'),
       status: err.status,
-      message: err.status === 404
-        ? 'Not found, or not visible to you.'
-        : err.status === 403 || err.status === 401
-          ? 'You are not authorised to see this.'
-          : 'That information could not be retrieved right now.',
+      message,
     };
   }
 }

@@ -13,9 +13,11 @@ const { createRouter } = require('./platform/router');
 const { createClientAgent } = require('./agents/client/agent');
 const { createClientAgentRouter } = require('./api/clientAgent');
 const { list: listTools } = require('./platform/tools/registry');
+const { createStudioClock } = require('./platform/time/studioClock');
+const { createAudit } = require('./platform/audit/log');
 const logger = require('./lib/logger');
 
-function buildApp({ config, erp, provider }) {
+function buildApp({ config, erp, provider, clock, audit }) {
   const app = express();
 
   app.disable('x-powered-by');
@@ -50,6 +52,26 @@ function buildApp({ config, erp, provider }) {
     tools: listTools(),
   }));
 
+  const rateLimited = {
+    error: { code: 'RATE_LIMITED', message: 'Too many requests. Please slow down.' },
+  };
+
+  // A per-IP backstop, in front of the token-keyed limiter.
+  //
+  // The token limiter below runs BEFORE authentication — it has to, since it is
+  // middleware — so a caller presenting a fresh junk token on each request lands
+  // in a fresh bucket every time and is never limited. Those requests do 401
+  // without touching the ERP or a model, so the cost is small, but "small times
+  // unbounded" is still unbounded. The ceiling is set well above the per-token
+  // limit so a whole studio behind one NAT is not throttled as one person.
+  const ipLimiter = rateLimit({
+    windowMs: config.RATE_LIMIT_WINDOW_MS,
+    max: config.RATE_LIMIT_IP_MAX,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: rateLimited,
+  });
+
   // §45 — keyed by token rather than IP so one studio behind one NAT is not
   // rate-limited as a single user. The token is hashed into the key by
   // express-rate-limit's store, never logged.
@@ -62,13 +84,22 @@ function buildApp({ config, erp, provider }) {
       const h = req.headers.authorization;
       return typeof h === 'string' && h.length > 16 ? h.slice(-32) : req.ip;
     },
-    message: { error: { code: 'RATE_LIMITED', message: 'Too many requests. Please slow down.' } },
+    message: rateLimited,
   });
 
   const router = createRouter({ config, provider });
-  const agent = createClientAgent({ erp, router });
+  const agent = createClientAgent({
+    erp,
+    router,
+    clock: clock || createStudioClock({ timeZone: config.STUDIO_TIMEZONE }),
+    audit: audit || createAudit({ config }),
+    budget: {
+      maxPerResult: config.MAX_TOOL_RESULT_CHARS,
+      maxTotal: config.MAX_CONTEXT_CHARS,
+    },
+  });
 
-  app.use('/ai/client-agent', limiter, createClientAgentRouter({ agent }));
+  app.use('/ai/client-agent', ipLimiter, limiter, createClientAgentRouter({ agent }));
 
   app.use((_req, res) => res.status(404).json({ error: { code: 'NOT_FOUND', message: 'No such endpoint.' } }));
 
