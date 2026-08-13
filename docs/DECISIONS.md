@@ -134,3 +134,73 @@ consulted — including for smalltalk, including for turns that will short-circu
 Anyone tempted to skip the ERP read "because the message is obviously harmless"
 should note that "obviously harmless" is a regex verdict, and a regex is not an
 authorisation decision.
+
+---
+
+## D4 · One studio-scoped tool, enumerated by name
+
+**Date:** 2026-08-13 · **Status:** accepted · **Refines:** [D1](#d1--studio-wide-questions-stay-in-the-erps-assistant)
+
+Recorded because it moves a boundary the test suite was enforcing absolutely,
+and the next person to hit that suite deserves to find a reason rather than a
+weakened regex.
+
+### Context
+
+RUNBOOK stage 5 asks for a `searchStudioKnowledge` tool over the ERP's
+`GET /api/ai/knowledge/search`, so policy questions can be answered from the
+studio's own uploaded SOPs instead of refused. Four tests refused it:
+
+| Test | Asserted |
+|---|---|
+| `redteam 01` | every tool's schema contains `clientId` |
+| `redteam 15`, `26` | every tool name starts with `getClient` |
+| `security.test.js` | the same, as part of the closed tool surface |
+
+`redteam.test.js` anticipates this moment in a comment: an earlier version of 01
+demanded every tool take *exactly* `['clientId']`, and the author noted that
+failing it "would have pushed whoever hit it toward loosening the check rather
+than reading it."
+
+### Decision
+
+The tool is registered, and the invariant is **re-expressed rather than
+relaxed**:
+
+- **Unchanged and absolute:** no tool may take a parameter that names a tenant.
+  `/org|tenant|studio|branch|company|location|user|role|trainer/` still applies
+  to every schema including this one, which takes `{ q, topK }`.
+- **Unchanged and absolute:** no tool is a write.
+- **Narrowed:** "every tool is a single-client read" becomes "every tool is a
+  single-client read except those in `STUDIO_DOCUMENT_TOOLS`", a list in
+  `__tests__/helpers.js` asserted by value to be exactly
+  `['searchStudioKnowledge']`.
+
+A second studio-scoped tool therefore fails `redteam 01a` and arrives back at
+this decision, which is the point. An exception a test names by hand stays
+auditable; a pattern that happens to admit the next tool does not.
+
+### Why this one is admissible under D1
+
+D1 keeps studio-wide questions in the ERP's assistant because **two tool layers
+over one database drift**, and the copy nobody watches is the one that rots.
+This tool is not a second implementation of anything: retrieval lives in the
+ERP's `retrieveContext()`, has exactly one implementation, and this calls it.
+Building a second retriever here is what D1 forbids, and is not what happened.
+
+The properties the single-client rule protects also hold:
+
+- it returns **no client's records**, so it cannot leak one client to another;
+- it reads documents owned by the **studio**, not by any person in it;
+- the ERP resolves the organisation from the forwarded user token and guards the
+  route with `requireStaff`, so it exposes nothing the trainer asking could not
+  already open under Settings → AI Knowledge;
+- its results are fenced as untrusted stored data on the same path as every
+  other tool result — `redteam 26`'s injection case covers it unchanged.
+
+### Consequences
+
+`getClient` as a prefix is no longer a load-bearing security property; it is a
+naming convention for the client reads. The property that carries weight is the
+enumeration in `STUDIO_DOCUMENT_TOOLS`, and anyone auditing the tool surface
+should read that list first.

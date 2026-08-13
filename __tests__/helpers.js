@@ -99,6 +99,34 @@ const systemOf = (provider, n = 0) => provider.seen[n].messages[0].content;
 const contextOf = (provider, n = 0) =>
   provider.seen[n].messages.find((m) => m.content.includes('RETRIEVED DATA'));
 
+/* ── The one exception to "every tool is a single-client read" ────────────────
+
+   This list is the whole boundary, written where a reviewer trips over it.
+
+   Every other registered tool takes a clientId and returns that client's
+   records. `searchStudioKnowledge` takes a QUERY and returns the studio's own
+   uploaded policies and SOPs — documents owned by the studio rather than by
+   anyone in it. It is here because the properties the single-client rule was
+   protecting still hold for it, not because the rule was inconvenient:
+
+     · it names no tenant, and cannot — its schema is { q, topK }, and the
+       /org|tenant|studio/ check below still applies to it unchanged;
+     · it returns no client's records, so it cannot leak one client to another;
+     · the ERP resolves the organisation from the forwarded user token and
+       guards the route with requireStaff, so it exposes nothing the trainer
+       asking could not already open in Settings → AI Knowledge;
+     · its results are fenced as untrusted stored data on the same path as
+       every other tool result.
+
+   ENUMERATED, not a pattern, and asserted to be exactly this one name. A second
+   studio-scoped tool will fail that assertion — deliberately. Whether the
+   service reaches past one client is a decision about what it IS (DECISIONS
+   D1), and it should be taken by a person looking at this comment, not
+   inherited by a regex that happens to admit the next tool too. */
+const STUDIO_DOCUMENT_TOOLS = ['searchStudioKnowledge'];
+
+const isStudioDocumentTool = (name) => STUDIO_DOCUMENT_TOOLS.includes(name);
+
 module.exports = {
   BASE_ENV,
   configWith,
@@ -112,6 +140,8 @@ module.exports = {
   post,
   systemOf,
   contextOf,
+  STUDIO_DOCUMENT_TOOLS,
+  isStudioDocumentTool,
 };
 
 /** A provider that streams, recording the prompt it was given. */

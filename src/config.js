@@ -65,6 +65,21 @@ const Schema = z.object({
   MAX_TOOL_RESULT_CHARS: z.coerce.number().int().positive().default(6_000),
   MAX_CONTEXT_CHARS: z.coerce.number().int().positive().default(24_000),
 
+  // ── Studio knowledge (RAG) ────────────────────────────────────────────────
+  // OFF by default, and deliberately so: it depends on an ERP endpoint
+  // (/api/ai/knowledge/search) that this service cannot detect the absence of
+  // until it 404s mid-answer. Turning it on is a statement that the ERP
+  // carrying that route is deployed.
+  //
+  // Off is the honest posture, not a degraded one — a policy question then gets
+  // "I don't have your studio's policy documents" rather than an answer
+  // composed from a client's records.
+  AI_KNOWLEDGE_ENABLED: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
+  // Left unset, the ERP applies its own AI_RAG_TOP_K default. Capped at the
+  // ERP's ceiling so a misconfiguration is refused here rather than clamped
+  // silently there.
+  AI_KNOWLEDGE_TOP_K: z.coerce.number().int().min(1).max(10).optional(),
+
   // ── HTTP ──────────────────────────────────────────────────────────────────
   // Comma-separated. No wildcard default: an authenticated API that reflects
   // any origin is a credential-forwarding hole, and §47 rules it out.

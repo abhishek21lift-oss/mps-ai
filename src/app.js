@@ -108,6 +108,18 @@ function buildApp({ config, erp, provider, clock, audit }) {
       maxPerResult: config.MAX_TOOL_RESULT_CHARS,
       maxTotal: config.MAX_CONTEXT_CHARS,
     },
+    // Phase 7. Non-null flips the classifier's ragAvailable: policy questions
+    // stop short-circuiting on "I don't have your policy documents" and start
+    // retrieving through searchStudioKnowledge instead.
+    //
+    // Gated on config rather than always-on because it depends on an ERP that
+    // carries GET /api/ai/knowledge/search. Enabling it against an ERP without
+    // that route means every policy question spends a 404 to learn nothing —
+    // which the agent reports honestly, but the honest answer was already
+    // available for free with this off.
+    knowledgeBase: config.AI_KNOWLEDGE_ENABLED
+      ? { topK: config.AI_KNOWLEDGE_TOP_K }
+      : null,
   });
 
   app.use('/ai/client-agent', ipLimiter, limiter, createClientAgentRouter({ agent }));

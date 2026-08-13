@@ -24,7 +24,7 @@
 
 const { planTools, planIntent } = require('./planner');
 const { systemPrompt } = require('./prompt');
-const { classify, shortCircuitAnswer } = require('../../platform/intent/classifier');
+const { classify, shortCircuitAnswer, CLASSES } = require('../../platform/intent/classifier');
 const { run: runTool } = require('../../platform/tools/registry');
 const { newFenceId, buildContext, neutralise } = require('../../platform/context/untrusted');
 const { checkGrounding } = require('../../platform/grounding/check');
@@ -85,6 +85,66 @@ function buildMessages({ system, contextBlock, history, question }) {
 /** No clock configured — used only by tests that predate the studio clock. */
 const NULL_CLOCK = { describe: () => null, today: () => null };
 const NULL_AUDIT = { request() {}, tool() {}, denied() {}, actor: () => 'unknown' };
+
+/** Mirrors the ERP's own MAX_QUERY_CHARS on /api/ai/knowledge/search. */
+const MAX_KNOWLEDGE_QUERY_CHARS = 500;
+
+/**
+ * What to tell the model when a policy question retrieved nothing usable.
+ *
+ * Three different silences, and collapsing them is how a studio that HAS a
+ * refund policy gets told it has none. The ERP endpoint returns
+ * documents_available alongside the chunks for exactly this reason, so this is
+ * the payoff for carrying that field: an empty result and an empty library are
+ * different facts, and the sentence a trainer reads should differ too.
+ *
+ * Returns null when retrieval worked and found something — there is then a
+ * policy in the fenced context and the standard grounding rules apply.
+ */
+const UNREACHABLE_DIRECTIVE = [
+  'This question refers to a studio policy or document.',
+  'The policy library could not be reached for this answer.',
+  'Answer only the part that comes from the client\'s records, and say plainly that you',
+  'could not check the studio\'s written policy this time.',
+  'Do not state, summarise, paraphrase or infer what any policy says.',
+].join('\n');
+
+function knowledgeDirective(result) {
+  if (!result) return null;
+  if (!result.ok) return UNREACHABLE_DIRECTIVE;
+
+  // The ERP wraps its payload: res.json({ data: { chunks, ... } }), and the ERP
+  // client hands back the response BODY, so the payload is one level in.
+  const body = result.data?.data ?? result.data;
+  const chunks = Array.isArray(body?.chunks) ? body.chunks : null;
+
+  // A shape we do not recognise is reported as "could not check", never as an
+  // empty library. Those are the two candidate wrong answers here and they are
+  // not equally wrong: "you have not uploaded any policies" is a false factual
+  // claim about the studio, made on the strength of a parse that failed.
+  if (chunks === null) return UNREACHABLE_DIRECTIVE;
+
+  if (chunks.length) return null;
+
+  // Nothing came back. Which of the two silences is it?
+  if (!body.documents_available) {
+    return [
+      'This question refers to a studio policy or document.',
+      'This studio has NOT UPLOADED any policy documents, SOPs or contracts yet — the library',
+      'is empty. Say that the studio has nothing uploaded, NOT that no policy covers this:',
+      'the studio may well have a written policy that simply is not in the app.',
+      'Do not state, summarise, paraphrase or infer what any policy says.',
+    ].join('\n');
+  }
+
+  return [
+    'This question refers to a studio policy or document.',
+    'The studio HAS uploaded policy documents, but none of them contain a passage relevant to',
+    'this question. Say that nothing in the uploaded documents covers it — not that the studio',
+    'has no policy, which you do not know.',
+    'Do not state, summarise, paraphrase or infer what any policy says.',
+  ].join('\n');
+}
 
 function createClientAgent({
   erp,
@@ -206,15 +266,67 @@ function createClientAgent({
 
     // getClientProfile was already fetched by the authorisation step; reuse it
     // rather than paying for the same call twice in one turn.
-    const toRun = planned.filter((t) => t !== 'getClientProfile');
+    const toRun = planned
+      .filter((t) => t !== 'getClientProfile')
+      .map((name) => ({ name, args: { clientId } }));
+
+    // 3a. Studio knowledge, when the question is about a policy and a knowledge
+    //     base is configured.
+    //
+    //     This is a SEPARATE line rather than a planner rule, and that is not
+    //     tidiness. planTools() maps a question to client-record tools, and
+    //     every tool it returns is called with `{ clientId }` — so a knowledge
+    //     tool reached that way would be handed a client id and refuse with
+    //     BAD_ARGS, because what it takes is a query.
+    //
+    //     It also has to be here rather than left to the classifier alone.
+    //     ragAvailable only changes what the CLASSIFIER decides: with a
+    //     knowledge base configured, RAG_QUERY stops short-circuiting and
+    //     DATABASE_PLUS_RAG drops its "I have no policy documents" directive.
+    //     Both of those REMOVE an honest refusal. If nothing then retrieves a
+    //     policy, the model is left answering a policy question from the
+    //     client's snapshot with no policy in front of it and no caveat — a
+    //     fabricated policy stated as the studio's own, which is the exact
+    //     failure §14 and the grounding check exist to prevent. Turning on
+    //     ragAvailable without this line is worse than leaving RAG off.
+    const wantsKnowledge = Boolean(knowledgeBase)
+      && (classification.intent === CLASSES.RAG_QUERY
+        || classification.intent === CLASSES.DATABASE_PLUS_RAG);
+
+    if (wantsKnowledge) {
+      toRun.push({
+        name: 'searchStudioKnowledge',
+        // Truncated rather than validated away: a long question should retrieve
+        // against its first 500 characters, not lose the policy half of its
+        // answer to a BAD_ARGS. Matches the ERP's own cap, which exists so a
+        // pasted document cannot be charged to the studio's embedding quota.
+        args: {
+          q: message.slice(0, MAX_KNOWLEDGE_QUERY_CHARS),
+          ...(knowledgeBase.topK ? { topK: knowledgeBase.topK } : {}),
+        },
+      });
+    }
+
     const results = [auth.profile];
 
-    // 3. Retrieve. In parallel — these are independent reads, and a trainer
-    //    mid-session should not wait on them serially.
-    const rest = await Promise.all(toRun.map((name) => runTool({
-      name, args: { clientId }, erp, userToken, requestId,
+    // 3b. Retrieve. In parallel — these are independent reads, and a trainer
+    //     mid-session should not wait on them serially.
+    const rest = await Promise.all(toRun.map(({ name, args }) => runTool({
+      name, args, erp, userToken, requestId,
     })));
     results.push(...rest);
+
+    // What each tool was actually asked for, for the audit line below. The
+    // knowledge query is recorded as a LENGTH rather than as text: the audit
+    // stream pseudonymises the actor on purpose, and writing the trainer's
+    // question into it verbatim would undo part of that for no investigative
+    // gain.
+    const auditArgs = new Map([['getClientProfile', { clientId }]]);
+    for (const { name, args } of toRun) {
+      auditArgs.set(name, name === 'searchStudioKnowledge'
+        ? { q_chars: args.q.length, topK: args.topK ?? null }
+        : args);
+    }
 
     const okResults = results.filter((r) => r.ok);
     const failed = results.filter((r) => !r.ok);
@@ -224,7 +336,7 @@ function createClientAgent({
         requestId,
         actor,
         tool: r.tool,
-        args: { clientId },
+        args: auditArgs.get(r.tool) ?? { clientId },
         ok: r.ok,
         code: r.code ?? null,
         status: r.status ?? null,
@@ -247,12 +359,23 @@ function createClientAgent({
     );
     const contextBlock = context.text;
 
+    // The classifier's directive is decided before anything is retrieved, so it
+    // cannot know whether the library answered. Where retrieval has something to
+    // add — it failed, or it came back empty — that is the more specific fact
+    // and it goes last.
+    const directive = [
+      classification.directive,
+      knowledgeDirective(wantsKnowledge
+        ? results.find((r) => r.tool === 'searchStudioKnowledge')
+        : null),
+    ].filter(Boolean).join('\n\n') || null;
+
     const system = systemPrompt({
       clientName: auth.name,
       now: clock.describe(),
       toolsRun: okResults.map((r) => r.tool),
       toolsFailed: failed.map((r) => r.tool),
-      directive: classification.directive,
+      directive,
     });
 
     const messages = buildMessages({ system, contextBlock, history, question: message });

@@ -267,22 +267,54 @@ git am < /path/to/mps-ai/docs/erp-patches/0001-ai-knowledge-search.patch
 npx jest src/__tests__/aiKnowledge.search.test.js     # 21 tests
 ```
 
-Deploy the ERP, then on this side — two changes, and the branch was built ahead
-of them:
+Deploy the ERP, then on this side. **This is done — branch `claude/rag-wiring`,
+473 tests, lint clean.** It is off by default; set `AI_KNOWLEDGE_ENABLED=true`
+once an ERP carrying the endpoint is deployed.
 
-1. Register a `searchStudioKnowledge` tool in `src/platform/tools/registry.js`
-   over `GET /api/ai/knowledge/search`.
-2. Pass a non-null `knowledgeBase` into `createClientAgent` in `src/app.js`.
-
-That flips the classifier's `ragAvailable` branch, which already exists and is
-already tested both ways in `__tests__/router.test.js`. `RAG_QUERY` stops
-short-circuiting and starts retrieving; `DATABASE_PLUS_RAG` drops its "I don't
-have your policy documents" directive.
+> ### Correction — this said "two changes" and that was wrong
+>
+> The two it named were: register a `searchStudioKnowledge` tool, and pass a
+> non-null `knowledgeBase` into `createClientAgent`. Applied alone, those two are
+> not merely incomplete — they are **worse than leaving RAG off**.
+>
+> `ragAvailable` changes what the **classifier** decides, and both of its effects
+> REMOVE an honest refusal: `RAG_QUERY` stops short-circuiting on "I don't have
+> your policy documents", and `DATABASE_PLUS_RAG` drops the directive saying the
+> same. Nothing then retrieves a policy, because `planTools()` maps a question to
+> client-record tools and knows nothing about a knowledge base:
+>
+> ```
+> "What's our cancellation policy?"
+>   intent RAG_QUERY | shortCircuit false | useTools true
+>   planTools -> getClientSummary, getClientProfile
+> ```
+>
+> The model would answer a policy question from the client's snapshot with no
+> policy in front of it and no caveat — a fabricated policy stated as the
+> studio's own, which is what §14 and the grounding check exist to prevent. The
+> tool would also refuse with `BAD_ARGS` if the planner did pick it, since
+> `prepare()` calls every planned tool with `{ clientId }` and this one takes a
+> query.
+>
+> The missing third change is in `prepare()`: it runs `searchStudioKnowledge` on
+> its own line, keyed off the classification, in the same parallel batch as the
+> client reads. `planTools()` is untouched, so its `{ clientId }` contract still
+> holds for everything it returns.
+>
+> Registering the tool also required moving a boundary the red-team suite
+> enforced absolutely — every tool a single-client read. See
+> [DECISIONS D4](./DECISIONS.md#d4--one-studio-scoped-tool-enumerated-by-name)
+> for what was narrowed, what stayed absolute, and why a second studio-scoped
+> tool will fail the suite on purpose.
 
 Upload documents at **Settings → AI Knowledge** (`admin`/`manager` only). Until
 something is uploaded, `documents_available: 0` lets the assistant say "your
 studio has not uploaded any policies" rather than "no policy covers that" —
-different sentences, and the patch exists partly to keep them different.
+different sentences, and the patch exists partly to keep them different. Three
+directives now carry that distinction into the prompt: empty library, library
+without a relevant passage, and retrieval failed. An unrecognised response shape
+reports as "could not check" rather than as an empty library — the second is a
+false factual claim about the studio, made on the strength of a failed parse.
 
 ---
 
