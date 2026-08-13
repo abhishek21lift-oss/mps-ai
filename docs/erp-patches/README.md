@@ -78,78 +78,64 @@ See [`../ERP-INTEGRATION-FACTS.md`](../ERP-INTEGRATION-FACTS.md) §5.
 
 ---
 
-## 0002 — gate `/api/progress` behind `requireStaff`
+## 0003 — gate every staff-only router behind `requireStaff`
 
 **Status:** written and tested against `619-erp-backend` @ `3c841d2`; **not
-pushed.** 12 tests passing, lint clean, existing `imageBodyLimit` suite still
-green.
+pushed.** 35 new tests; the 14 suites that read `server.js` and can run without
+a live Postgres go from 138 passing to 173, no regressions.
 
-**Priority: this one is a live privilege issue, not an enhancement.** It was
-found while checking whether an assessment-history endpoint existed, and it is
-unrelated to anything this service needs — it would be worth fixing if `mps-ai`
-did not exist at all.
+**Supersedes 0002**, which covered `/api/progress` only. Apply this one instead.
+
+**Priority: a live privilege issue, not an enhancement.** Unrelated to anything
+this service needs — worth fixing if `mps-ai` did not exist.
 
 ### What it is
 
-`app.use('/api/progress', require(...))` is mounted with **no `requireStaff`**,
-and every GET on that router takes an **optional** `client_id`. Omit it and you
-get the whole organisation's rows. Nine routes behave that way: assessments,
-goals, weekly check-ins, strength logs, progress photos, lifestyle, nutrition,
-mobility and posture.
-
-`tenantScope()` still applies, so this is **not a cross-tenant leak** — nothing
-crosses a studio boundary. But client-portal accounts are created with
-`role='member'` and their studio's `organization_id` (`routes/client-login.js`),
-and `auth()` loads that onto `req.user` for every account. So a logged-in client
-can call:
-
-```
-GET /api/progress/assessments
-```
-
-and receive **every assessment in their gym** — other clients' body composition,
-health notes and trainer notes.
-
-This is precisely the failure `requireStaff` was written to prevent. Its own
-comment in `middleware/rbac.js` says so:
+`requireStaff` went in for `/api/pt-os` and stopped there. Its own comment in
+`middleware/rbac.js` states why it exists:
 
 > *Read routes across the staff modules were gated on `auth` alone. That was
 > survivable only because no account had ever held the `member` role: there was
 > nobody to abuse it. Client logins create those accounts by the hundred…*
 
-The `requireStaff` rollout covered `/api/pt-os` (four mounts) and
-`/api/client-login`. `/api/progress` was missed.
+Ten other routers still have that shape. **This is not a cross-tenant issue** —
+`tenantScope()` confines everything to one studio and that boundary is intact.
+It is a privilege one: a client-portal account carries its studio's
+`organization_id`, so `auth` alone admits it.
 
-### The fix
+From a logged-in **client** account:
 
-One line, matching the `/api/pt-os` precedent exactly: `auth, requireStaff` on
-the mount. A client's own progress is served by `/api/me`, which scopes to the
-caller.
+| Request | Returns |
+|---|---|
+| `GET /api/clients` | `SELECT c.*` for up to 1000 `pt_clients` rows — names, mobiles, emails, balances, notes, injuries |
+| `GET /api/reports/revenue` | the studio's total revenue |
+| `GET /api/reports/dues` | the top 100 debtors and what they owe |
+| `GET /api/progress/*` | nine GETs whose `client_id` is **optional**; omitted, each returns every row in the organisation |
 
-### Before merging — ✅ checked, and clear
+plus `trainers`, `payments`, `attendance`, `expenses`, `invoices`,
+`communication` and `search` on the same footing.
 
-The open question was whether a client-facing screen calls `/api/progress`
-directly, in which case gating it would break the portal. **It does not.**
-Verified against `abhishek21lift-oss/619-erp-frontend` @ `20a7a8a`:
+The trainer scope inside `GET /api/clients` does not help: it fires only for
+`role === 'trainer'`, so a `member` skips it entirely.
 
-- Every call goes through one module, `src/lib/api/endpoints/progress.ts`.
-- Its consumers are all staff surfaces — `app/(chrome)/pt-os/**`,
-  `app/(chrome)/ai/**`, `components/pt-os/**`, `components/profile/**` — plus
-  the `src/lib/api/index.ts` barrel.
-- The client portal is `app/(bare)/member/**`. Grepping that tree, and
-  `(bare)/client` and `(bare)/member-login`, for `api/progress`, `progressApi`
-  or `endpoints/progress` returns **nothing**.
-- `app/(bare)/member/dashboard/page.tsx` calls exactly one endpoint: `/api/me`.
+### Verified before gating
 
-So `requireStaff` on this mount breaks no client-facing screen, which is what
-you would expect — `/api/me` is where a client's own progress already comes
-from. **This patch is ready to merge.**
+**The client portal calls exactly one endpoint: `/api/me`.** No screen under
+`app/(bare)/member`, `/client` or `/member-login` in `619-erp-frontend`
+references any router touched here. That is the check 0002 had to leave open,
+and it is now closed — for all ten.
+
+### Ordering
+
+`requireStaff` precedes the feature gate, so a client cannot learn which
+features a studio has from the shape of the refusal. `auth()` runs twice on
+those lines, which is the cheap case the `/api/pt-os` mounts already document —
+the second call is a user-cache hit.
 
 ### Worth considering separately
 
-Making `client_id` **required** on those nine GETs would be useful hardening,
-but it is *not* a substitute for this patch: a member could still pass another
-client's id and read it, since the routes are org-scoped and not
-caller-scoped. It would also change behaviour for staff screens that
-legitimately list across clients, so it needs its own review rather than being
-folded in here.
+Making `client_id` **required** on the nine `/api/progress` GETs is useful
+hardening but is *not* a substitute: a member could still pass another client's
+id, since those routes are org-scoped rather than caller-scoped. It also changes
+behaviour for staff screens that legitimately list across clients, so it needs
+its own review.

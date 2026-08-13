@@ -180,6 +180,8 @@ says it must be entered in the app, and never implies an action has been taken.
 |---|---|
 | `GET /pt-os/clients` (list) | org **and trainer** — `role === 'trainer' ? trainer_id : query.trainer_id` |
 | `GET /reports/dues/summary` | org **and trainer** — same pattern |
+| `GET /clients/:id/attendance` | org **and trainer** — 403 for a trainer viewing a colleague's client |
+| `GET /clients/:id/payments` | org **and trainer** — same |
 | `GET /pt-os/clients/:id` | **org only** — `orgWhere(req, params, 'c.organization_id')`, no trainer clause |
 | `GET /pt-os/clients/:id/*` | **org only** — child records gate on `clientInOrg()` |
 
@@ -190,8 +192,21 @@ read by client id is not**. `requireTrainerOwnership` exists in
 The whole `/api/pt-os` surface is mounted behind `auth, requireStaff`, so the
 `member` role is excluded outright.
 
-**A trainer can therefore already open a colleague's client in the normal UI**,
-and every endpoint this service calls is a by-id read.
+**A trainer can therefore already open a colleague's client in the normal UI.**
+
+### The tool set has mixed granularity, and it shows
+
+Nine of this service's eleven tools read `pt-os` endpoints and are
+organisation-scoped. **Two are not:** `getClientAttendance` and
+`getClientPayments` hit `/api/clients/:id/*`, whose handlers refuse a trainer
+looking at a client that is not theirs.
+
+So a trainer asking about a colleague's client gets a *partial* answer: profile,
+snapshot and training brief return data, while attendance and payments come back
+as `toolsUnavailable`. That is correct — the tool layer relays the 403 as a
+denial rather than an outage, and the prompt tells the model to say what it
+could not see — but it is worth knowing that the seam exists, because it looks
+like a bug from the outside and is not one.
 
 This service inherits exactly that boundary rather than inventing a stricter
 one, so the assistant never disagrees with the screen beside it.

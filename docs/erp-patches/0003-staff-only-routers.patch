@@ -1,0 +1,259 @@
+From e986fe252261d36f3cd34b713dc2b4953ff74a64 Mon Sep 17 00:00:00 2001
+From: abhishek21lift-oss <abhishekkatiyar210399@gmail.com>
+Date: Thu, 13 Aug 2026 13:35:38 +0000
+Subject: [PATCH] Gate every staff-only router behind requireStaff
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+requireStaff went in for /api/pt-os and stopped there. Its own comment in
+middleware/rbac.js states why it exists: read routes were gated on `auth`
+alone, "survivable only because no account had ever held the `member` role...
+client logins create those accounts by the hundred." Ten other routers still
+have that shape.
+
+This is not a cross-tenant issue. tenantScope() confines everything to one
+studio and that boundary is intact. It is a privilege one: a logged-in CLIENT
+carries their studio's organization_id, so `auth` alone let them read their own
+gym's staff data.
+
+Concretely, from a client-portal login:
+
+  GET /api/clients            `SELECT c.*` for up to 1000 pt_clients rows —
+                              names, mobiles, emails, balances, notes, injuries.
+                              The trainer scope in that handler only fires for
+                              role === 'trainer', so a member skips it.
+  GET /api/reports/revenue    the studio's total revenue.
+  GET /api/reports/dues       the top 100 debtors and what they owe.
+  GET /api/progress/*         nine GETs whose client_id is OPTIONAL; omitted,
+                              each returns every row in the organisation.
+
+plus trainers, payments, attendance, expenses, invoices, communication and
+search on the same footing.
+
+Verified before gating: the client portal calls exactly ONE endpoint, /api/me.
+No screen under app/(bare)/member, /client or /member-login in
+619-erp-frontend references any router touched here, so nothing client-facing
+breaks. That check is what the earlier single-router version of this change had
+to leave open.
+
+requireStaff deliberately precedes the feature gate, so a client cannot learn
+which features a studio has from the shape of the refusal. auth() runs twice on
+those lines and that is fine — the second call is a user-cache hit, as the
+/api/pt-os mounts already note.
+
+The test asserts the MOUNTS rather than the handlers, because the mount is
+where the fix lives and where a refactor would silently drop it, and spells out
+the failing shape so a reviewer can see what regressed if it goes red.
+
+Supersedes the /api/progress-only change; this covers it and nine more.
+
+35 new tests. The 14 suites that read server.js and can run without a live
+Postgres go from 138 passing to 173, with no regressions.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FAaG5CcyAiLJvYQCZ9Civb
+---
+ src/__tests__/staffOnlyRouters.test.js | 92 ++++++++++++++++++++++++++
+ src/server.js                          | 43 +++++++++---
+ 2 files changed, 125 insertions(+), 10 deletions(-)
+ create mode 100644 src/__tests__/staffOnlyRouters.test.js
+
+diff --git a/src/__tests__/staffOnlyRouters.test.js b/src/__tests__/staffOnlyRouters.test.js
+new file mode 100644
+index 0000000..08c318c
+--- /dev/null
++++ b/src/__tests__/staffOnlyRouters.test.js
+@@ -0,0 +1,92 @@
++// The staff-only routers, asserted at the mount.
++//
++// requireStaff went in for /api/pt-os and stopped there. Its own comment in
++// middleware/rbac.js gives the reason it exists — read routes gated on `auth`
++// alone were "survivable only because no account had ever held the `member`
++// role" — and client logins create those accounts by the hundred.
++//
++// This is not a cross-tenant issue: tenantScope() still confines everything to
++// one studio. It is a privilege one. A logged-in CLIENT could read their own
++// gym's staff data — the client roster with contact details and notes, the
++// studio's revenue and outstanding dues, and every progress record in the
++// organisation.
++//
++// Asserted at the MOUNT rather than per-handler, because the mount is where the
++// fix lives and where a refactor would silently drop it.
++'use strict';
++
++const fs = require('fs');
++const path = require('path');
++
++const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
++
++const STAFF_ONLY = [
++  'clients',        // GET / returns c.* for up to 1000 rows
++  'progress',       // nine GETs whose client_id is optional
++  'reports',        // revenue, dues, trainer performance
++  'trainers',
++  'payments',
++  'attendance',
++  'expenses',
++  'invoices',
++  'communication',
++  'search',
++];
++
++describe('every staff-only router is mounted behind requireStaff', () => {
++  test.each(STAFF_ONLY)('/api/%s', (name) => {
++    const mount = new RegExp(`app\\.use\\('/api/${name}',[^;]*requireStaff[^;]*require\\(`);
++    expect(server).toMatch(mount);
++  });
++
++  test.each(STAFF_ONLY)('/api/%s is not mounted without one', (name) => {
++    // The failing shape written out, so a reviewer can see exactly what
++    // regressed if this goes red.
++    const lines = server.split('\n').filter((l) => l.includes(`app.use('/api/${name}'`));
++    expect(lines.length).toBeGreaterThan(0);
++    for (const line of lines) expect(line).toContain('requireStaff');
++  });
++});
++
++describe('the gate is ordered so a client learns nothing extra', () => {
++  test.each(['reports', 'expenses', 'invoices', 'communication', 'attendance'])(
++    'requireStaff precedes the feature gate on /api/%s', (name) => {
++      const line = server.split('\n').find((l) => l.includes(`app.use('/api/${name}'`));
++      expect(line.indexOf('requireStaff')).toBeLessThan(line.indexOf('gate('));
++    },
++  );
++});
++
++describe('the client portal is unaffected', () => {
++  test('/api/me is still mounted for clients, not staff', () => {
++    // The portal calls exactly one endpoint. Gating the routers above breaks
++    // nothing it uses — verified against 619-erp-frontend, where no screen
++    // under app/(bare)/member, /client or /member-login references any of them.
++    expect(server).toMatch(/app\.use\('\/api\/me',\s*auth,\s*requireClient,/);
++  });
++});
++
++describe('requireStaff still means what it says', () => {
++  const { requireStaff, STAFF_ROLES } = require('../middleware/rbac');
++
++  const run = (user) => {
++    let status = null;
++    let passed = false;
++    const res = { status: (s) => { status = s; return res; }, json: () => res };
++    requireStaff({ user }, res, () => { passed = true; });
++    return { passed, status };
++  };
++
++  test('a member is refused', () => {
++    expect(run({ role: 'member', organization_id: 'org-1' }))
++      .toMatchObject({ passed: false, status: 403 });
++  });
++
++  test.each(STAFF_ROLES)('%s is admitted', (role) => {
++    expect(run({ role, organization_id: 'org-1' }).passed).toBe(true);
++  });
++
++  test('member is absent from the allow-list', () => {
++    expect(STAFF_ROLES).not.toContain('member');
++  });
++});
+diff --git a/src/server.js b/src/server.js
+index 329eab2..d751f4a 100644
+--- a/src/server.js
++++ b/src/server.js
+@@ -504,7 +504,30 @@ app.use('/api/subscription',      require('./routes/subscription'));
+ // Global top-nav search. Carries its own rate limiter (see routes/search.js),
+ // so it is deliberately NOT wrapped in userApiLimiter — debounced typing would
+ // otherwise consume the shared per-user budget that real API calls need.
+-app.use('/api/search',            require('./routes/search'));
++// ── Staff-only routers ──────────────────────────────────────────────────────
++//
++// requireStaff went in for /api/pt-os and stopped there. Its own comment in
++// middleware/rbac.js states the reason it exists: read routes were gated on
++// `auth` alone, "survivable only because no account had ever held the `member`
++// role... client logins create those accounts by the hundred."
++//
++// Those accounts carry their studio's organization_id, so tenantScope() lets
++// them through — the boundary that matters for tenancy is intact, and nothing
++// here is a cross-tenant leak. What it means is that a logged-in CLIENT could
++// read their own gym's staff data: GET /api/clients returns `c.*` for up to a
++// thousand rows (names, mobiles, emails, balances, notes), /api/reports/revenue
++// and /dues return the studio's finances, and the nine GETs on /api/progress
++// take an optional client_id that, omitted, returns the whole organisation.
++//
++// Verified before gating: the client portal calls exactly ONE endpoint,
++// /api/me. No screen under app/(bare)/member, /client or /member-login touches
++// any router below.
++//
++// auth() runs twice on the ...gate() lines and that is fine — the second call
++// is a user-cache hit, as the /api/pt-os mounts below already note. requireStaff
++// deliberately precedes the feature gate so a client cannot learn which
++// features a studio has by the shape of the refusal.
++app.use('/api/search',            auth, requireStaff, require('./routes/search'));
+ 
+ // ONE router, deliberately. This mount used to carry a second file,
+ // routes/client-actions.js, whose thirteen endpoints read and wrote the legacy
+@@ -516,15 +539,15 @@ app.use('/api/search',            require('./routes/search'));
+ // org-scoped equivalents live under /api/pt-os/clients.
+ // See src/__tests__/clients.legacy-table.test.js, which fails if anything
+ // mounted here starts reading that table again.
+-app.use('/api/clients',           userApiLimiter, require('./routes/clients'));
++app.use('/api/clients',           userApiLimiter, auth, requireStaff, require('./routes/clients'));
+ 
+-app.use('/api/trainers',          require('./routes/trainers'));
++app.use('/api/trainers',          auth, requireStaff, require('./routes/trainers'));
+ // Manual UTR verification payments. MUST be mounted before the finance ledger
+ // router below: that one owns DELETE /:id and a bare /:id would otherwise
+ // swallow /api/payments/upi/... before this router ever sees it.
+ app.use('/api/payments/upi',      userApiLimiter, require('./routes/upi-payments'));
+-app.use('/api/payments',          userApiLimiter, require('./routes/payments'));
+-app.use('/api/attendance',        ...gate('attendance'), require('./routes/attendance'));
++app.use('/api/payments',          userApiLimiter, auth, requireStaff, require('./routes/payments'));
++app.use('/api/attendance',        auth, requireStaff, ...gate('attendance'), require('./routes/attendance'));
+ 
+ // ROUTE INTEGRITY NOTE (R-03) — SUPERSEDED, and deliberately reversed.
+ //
+@@ -545,11 +568,11 @@ app.use('/api/attendance',        ...gate('attendance'), require('./routes/atten
+ // So "legacy" had it backwards: /api/reports is the tenant-safe, live
+ // implementation, and the migration target was the unsafe one. Do not
+ // reintroduce a v1 reports router without organization_id on its tables.
+-app.use('/api/reports',           userApiLimiter, ...gate('insights'), require('./routes/reports'));
++app.use('/api/reports',           userApiLimiter, auth, requireStaff, ...gate('insights'), require('./routes/reports'));
+ 
+ app.use('/api/plans',             ...gate('packages'), require('./routes/plans'));
+ app.use('/api/leave',             require('./routes/leave'));
+-app.use('/api/expenses',          ...gate('finance'), require('./routes/expenses'));
++app.use('/api/expenses',          auth, requireStaff, ...gate('finance'), require('./routes/expenses'));
+ 
+ // ROUTE INTEGRITY NOTE (R-03 / bookings):
+ // /api/bookings and /api/v1/bookings both mount the same router.
+@@ -586,7 +609,7 @@ app.use('/api/modules',           require('./modules/operations/operations.route
+ app.use('/api/calendar',          require('./routes/calendar'));
+ app.use('/api/qr',               ...gate('attendance'), require('./routes/qr-checkin'));
+ app.use('/api/settings',          require('./routes/settings'));
+-app.use('/api/invoices',          ...gate('finance'), require('./routes/invoices'));
++app.use('/api/invoices',          auth, requireStaff, ...gate('finance'), require('./routes/invoices'));
+ app.use('/api/workouts',          ...gate('programs'), require('./routes/workouts'));
+ // The Exercise Library. Sits behind the same 'programs' feature as the Workout
+ // Builder it feeds — a studio with programmes always has the library, and one
+@@ -602,7 +625,7 @@ app.use('/api/integrations',      ...gate('integrations'), require('./routes/int
+ app.use('/api/campaigns',         ...gate('communication'), require('./routes/campaigns'));
+ app.use('/api/offers',            require('./routes/offers'));
+ app.use('/api/feedback',          require('./routes/feedback'));
+-app.use('/api/communication',     ...gate('communication'), require('./routes/communication'));
++app.use('/api/communication',     auth, requireStaff, ...gate('communication'), require('./routes/communication'));
+ // Mounted before /api/ai so /api/ai/knowledge/* is matched here first,
+ // regardless of what routes/ai.js's own router does internally.
+ // The AI mounts additionally carry a token-quota guard. It runs AFTER the
+@@ -655,7 +678,7 @@ app.use('/api/client-login',     auth, requireStaff, require('./routes/client-lo
+ // ────────────────────────
+ // BUSINESS FLOW ROUTES (v4 — Progress, Automation)
+ // ────────────────────────
+-app.use('/api/progress',         require('./modules/progress/progress.routes'));
++app.use('/api/progress',         auth, requireStaff, require('./modules/progress/progress.routes'));
+ app.use('/api/automation',       require('./modules/automation/automation.routes'));
+ 
+ // ────────────────────────
+-- 
+2.43.0
+
