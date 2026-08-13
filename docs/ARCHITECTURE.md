@@ -153,6 +153,8 @@ All read-only, all single-client, each verified to exist in `619-erp-backend`.
 | `getClientCommunication` | `GET /api/pt-os/clients/:id/communication` |
 | `getClientAttendance` | `GET /api/clients/:id/attendance` |
 | `getClientPayments` | `GET /api/clients/:id/payments` |
+| `getClientTrainingAnalytics` | `GET /api/pt-os/workout-log/analytics` |
+| `getClientVolumeSummary` | `GET /api/pt-os/workout-log/volume-summary` |
 
 ## 7. Intent classification
 
@@ -275,11 +277,18 @@ exists.
 
 Honest list; none of it is stubbed to look finished.
 
-- **Studio-wide tools** (`get_revenue`, `get_dashboard_metrics`, …). Blocked on
-  an endpoint inventory of `619-erp-backend`. A tool whose endpoint 404s makes
-  the agent report a fabricated failure as fact.
-- **Role-aware tool gating.** Blocked on the ERP's role model.
-- **RAG / knowledge base.** Needs a product decision on where documents live.
+- **Studio-wide tools** — **deliberately not built here.** The ERP already has
+  them, tenant-scoped and role-gated. Building a second set would create two
+  places a tenant predicate can be edited. See [DECISIONS.md](./DECISIONS.md) D1.
+- **Role-aware tool gating** — **satisfied by design.** This service cannot read
+  a role; the ERP resolves one per request and returns 403, which the tool layer
+  relays as a denial. A second role model here is explicitly rejected (D1).
+- **RAG / knowledge base.** The ERP has one — documents, chunking, embeddings and
+  a tenant-scoped `retrieveContext()`. It is reachable only from inside
+  `routes/ai.js`, so this needs **one new ERP endpoint**
+  (`GET /api/ai/knowledge/search`), not a new subsystem. The `ragAvailable`
+  branch here is already written and tested. See
+  [ERP-INTEGRATION-FACTS.md](./ERP-INTEGRATION-FACTS.md) §5.
 - **Trainer-level object authorisation on client-by-id reads.** Not present in
   the ERP for these endpoints; see SECURITY.md §7.
 - **Streaming**, **write actions**, **feedback and evaluation harness**,

@@ -27,6 +27,24 @@ const logger = require('../../lib/logger');
 const ClientId = z.string().trim().min(1).max(64)
   .regex(/^[A-Za-z0-9_-]+$/, 'clientId must be an opaque id');
 
+/**
+ * Build a query string from already-validated values.
+ *
+ * Used only by endpoints that take the client as `?client_id=` rather than as a
+ * path segment. Values reaching here have passed the tool's zod schema — an
+ * enum, a bounded integer, or ClientId — so this is encoding, not sanitising.
+ * URLSearchParams is used anyway rather than string concatenation, because the
+ * next person to add a tool should not have to know that distinction.
+ */
+function qs(params) {
+  const sp = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) {
+    if (v !== undefined && v !== null && v !== '') sp.set(k, String(v));
+  }
+  const s = sp.toString();
+  return s ? `?${s}` : '';
+}
+
 const TOOLS = new Map();
 
 function define(tool) {
@@ -103,6 +121,43 @@ define({
   label: 'communication history',
   args: z.object({ clientId: ClientId }),
   endpoint: ({ clientId }) => `/api/pt-os/clients/${encodeURIComponent(clientId)}/communication`,
+});
+
+/* ── Training depth ──────────────────────────────────────────────────────────
+   These take the client as a QUERY parameter rather than a path segment, which
+   is the ERP's own shape for them, not a choice made here.
+
+   The tenant boundary is unchanged and still theirs: /workout-log/analytics
+   calls clientInOrg() and answers 404 for a client outside the caller's
+   organisation, exactly as the by-id routes do. Neither tool accepts an
+   organisation, and neither could express one. */
+
+define({
+  name: 'getClientTrainingAnalytics',
+  summary: 'Measured training analytics from the workout log: attendance against plan, strength trend, muscle-group coverage, and days since each muscle was last trained.',
+  label: 'training analytics',
+  args: z.object({
+    clientId: ClientId,
+    // The ERP clamps this to 1..52 itself; bounded here too so an
+    // out-of-range value is a BAD_ARGS locally rather than a silent clamp
+    // upstream that makes the answer describe a different window than asked for.
+    weeks: z.coerce.number().int().min(1).max(52).default(12),
+  }),
+  // `as_of` is deliberately NOT sent. The ERP has its own studioToday(), and
+  // supplying ours would give one request two opinions about what day it is —
+  // the same reason this service does not re-implement orgWhere().
+  endpoint: ({ clientId, weeks }) => `/api/pt-os/workout-log/analytics${qs({ client_id: clientId, weeks })}`,
+});
+
+define({
+  name: 'getClientVolumeSummary',
+  summary: 'Training volume per week or month, aggregated in the database — total load and session count over time.',
+  label: 'training volume',
+  args: z.object({
+    clientId: ClientId,
+    groupBy: z.enum(['week', 'month']).default('week'),
+  }),
+  endpoint: ({ clientId, groupBy }) => `/api/pt-os/workout-log/volume-summary${qs({ client_id: clientId, group_by: groupBy })}`,
 });
 
 function get(name) {

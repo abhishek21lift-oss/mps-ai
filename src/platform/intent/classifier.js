@@ -273,10 +273,17 @@ function decision(intent, reason, { shortCircuit, useTools, directive = null }) 
 function shortCircuitAnswer(intent, { clientName } = {}) {
   switch (intent) {
     case CLASSES.UNAUTHORIZED_REQUEST:
+      // Points somewhere rather than dead-ending. Studio-wide questions are
+      // answered by the assistant in the main app, which holds the tools for
+      // them — this service deliberately does not duplicate those. A refusal
+      // that names the right door is the difference between a boundary and an
+      // obstruction.
       return 'This assistant answers about one client at a time — the one open in front of you'
         + `${clientName ? ` (${clientName})` : ''}. It has no access to other clients, other`
-        + ' trainers, or other studios, and no way to obtain it. To ask about someone else,'
-        + ' open their profile and ask there.';
+        + ' trainers, or other studios, and no way to obtain it.'
+        + ' To ask about someone else, open their profile and ask there.'
+        + ' For studio-wide questions — revenue, outstanding dues, attendance across clients —'
+        + ' use the AI assistant in the main app.';
 
     case CLASSES.RAG_QUERY:
       return 'I don\'t have your studio\'s policy documents, SOPs or contracts — only client'

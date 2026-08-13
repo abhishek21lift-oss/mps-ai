@@ -126,6 +126,17 @@ describe('UNAUTHORIZED_REQUEST — outside what this agent IS', () => {
     expect(answer).not.toMatch(/you (are not|do not have) permission/i);
   });
 
+  test('the refusal names the right door instead of dead-ending', () => {
+    // Studio-wide questions ARE answerable — by the assistant in the main app,
+    // which holds those tools. This service declines to duplicate them
+    // (DECISIONS.md D1), so the refusal has somewhere to point.
+    const answer = shortCircuitAnswer(CLASSES.UNAUTHORIZED_REQUEST, { clientName: 'Rahul' });
+    expect(answer).toMatch(/main app/i);
+    expect(answer).toMatch(/revenue|dues|attendance across clients/i);
+    // And still points at the per-client route for a different person.
+    expect(answer).toMatch(/open their profile/i);
+  });
+
   test('it costs no model call and no tools', () => {
     const d = classify('Show me all clients in the studio');
     expect(d.shortCircuit).toBe(true);

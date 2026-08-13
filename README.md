@@ -113,6 +113,8 @@ Read-only. Each maps to exactly one endpoint verified to exist in
 | `getClientCommunication` | `GET /api/pt-os/clients/:id/communication` |
 | `getClientAttendance` | `GET /api/clients/:id/attendance` |
 | `getClientPayments` | `GET /api/clients/:id/payments` |
+| `getClientTrainingAnalytics` | `GET /api/pt-os/workout-log/analytics` |
+| `getClientVolumeSummary` | `GET /api/pt-os/workout-log/volume-summary` |
 
 Tool selection is deterministic pattern matching (`agents/client/planner.js`),
 not a model call — one round trip instead of two, and only the data the question
@@ -211,6 +213,7 @@ npm run lint
 
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — modules, request lifecycle, tool layer, model abstraction
 - [`docs/SECURITY.md`](docs/SECURITY.md) — trust boundaries, tenant isolation, injection, audit, residual risks
+- [`docs/DECISIONS.md`](docs/DECISIONS.md) — why studio-wide questions stay in the ERP's assistant, and what follows from that
 - [`docs/ERP-INTEGRATION-FACTS.md`](docs/ERP-INTEGRATION-FACTS.md) — verified facts about `619-erp-backend`: tenancy, roles, endpoints, RAG
 - [`docs/PHASE-0-DISCOVERY.md`](docs/PHASE-0-DISCOVERY.md) — the audit this design came out of (superseded where the two disagree)
 

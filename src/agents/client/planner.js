@@ -47,6 +47,18 @@ const RULES = [
   { re: /\b(progress|improve|change|trend|better|worse|since)\b/i,
     tools: ['getClientSummary', 'getClientAttendance'] },
 
+  // Training depth, from the workout log. Kept distinct from the generic
+  // "progress" rule above: that one is about measurements and showing up,
+  // these are about what was actually lifted.
+  { re: /\b(stronger|strength|1rm|one.?rep|pr\b|personal record|lifting|lift|load)\b/i,
+    tools: ['getClientTrainingAnalytics'] },
+  { re: /\b(volume|tonnage|workload|training load|how much (work|volume))\b/i,
+    tools: ['getClientVolumeSummary'] },
+  // Suffixes matter here: a bare \bovertrain\b does not match "overtraining",
+  // and "last trained" does not match "last train legs".
+  { re: /\b(muscle group|coverage|balanced|neglect\w*|overtrain\w*|overcook\w*|recovery|rest day|last train\w*)\b/i,
+    tools: ['getClientTrainingAnalytics'] },
+
   // Contact.
   { re: /\b(call|contact|phone|mobile|number|message|communicat|follow.?up|whatsapp)\b/i,
     tools: ['getClientProfile', 'getClientCommunication'] },
