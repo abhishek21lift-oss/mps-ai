@@ -175,3 +175,81 @@ describe('end to end', () => {
     for (const n of names) expect(n).toMatch(/^getClient/);
   });
 });
+
+describe('assessment history', () => {
+  const { list } = require('../src/platform/tools/registry');
+  const { planTools } = require('../src/agents/client/planner');
+
+  test('client_id is always in the URL, at every limit', () => {
+    // Load-bearing, not tidy. On the ERP side client_id is OPTIONAL, and a
+    // request that omits it returns every assessment in the organisation —
+    // other clients' body composition, health notes and trainer notes, in a
+    // prompt about one person. The schema makes omitting it impossible; this
+    // asserts the property the schema is protecting.
+    const tool = get('getClientAssessmentHistory');
+    for (const limit of [1, 6, 24]) {
+      expect(tool.endpoint({ clientId: 'c-1', limit })).toContain('client_id=c-1');
+    }
+  });
+
+  test('the default asks for six, not for everything available', () => {
+    expect(get('getClientAssessmentHistory').endpoint({ clientId: 'c-1', limit: 6 }))
+      .toBe('/api/progress/assessments?client_id=c-1&limit=6');
+  });
+
+  test('the limit is stricter than the ERP ceiling of 200', async () => {
+    const erp = fakeErp(async () => ({ data: {}, latency_ms: 1 }));
+    const res = await run({
+      name: 'getClientAssessmentHistory', args: { clientId: 'c-1', limit: 200 }, erp, userToken: 't',
+    });
+
+    expect(res.ok).toBe(false);
+    expect(res.code).toBe('BAD_ARGS');
+    expect(erp.calls).toHaveLength(0);
+  });
+
+  test('it is registered as a single-client read', () => {
+    expect(list().map((t) => t.name)).toContain('getClientAssessmentHistory');
+    expect(Object.keys(get('getClientAssessmentHistory').args.shape)).toContain('clientId');
+  });
+
+  test.each([
+    'What changed since the last assessment?',
+    'How does he compare to his previous assessment?',
+    'Show me his assessment history',
+    'Has he improved over time?',
+  ])('comparison questions reach for history: %s', (msg) => {
+    expect(planTools(msg).tools).toContain('getClientAssessmentHistory');
+  });
+
+  test('a plain "what does he weigh" does not pull the whole history', () => {
+    const { tools } = planTools('What does he weigh?');
+    expect(tools).toContain('getClientSummary');
+    expect(tools).not.toContain('getClientAssessmentHistory');
+  });
+
+  test('end to end: history reaches the model with the client scoped', async () => {
+    const erp = fakeErp(async (path) => {
+      if (path.includes('/progress/assessments')) {
+        return { data: { data: [
+          { assessment_date: '2026-08-01', body_fat_pct: 21.4 },
+          { assessment_date: '2026-05-02', body_fat_pct: 24.9 },
+        ] }, latency_ms: 1 };
+      }
+      return { data: { data: { name: 'Rahul' } }, latency_ms: 1 };
+    });
+    const { app, provider } = appWith({ erp, clock: fixedClock() });
+
+    const res = await post(app, { clientId: 'c-1', message: 'What changed since the last assessment?' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.toolsUsed).toContain('getClientAssessmentHistory');
+
+    const call = erp.calls.find((c) => c.path.includes('/progress/assessments'));
+    expect(call.path).toContain('client_id=c-1');
+
+    const ctx = provider.seen[0].messages.find((m) => m.content.includes('RETRIEVED DATA'));
+    expect(ctx.content).toContain('24.9');
+    expect(ctx.content).toContain('assessment history');
+  });
+});

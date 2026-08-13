@@ -60,7 +60,7 @@ Decisions worth reviewing rather than assuming:
 - **Retrieval failures answer empty rather than 500**, matching the AI Coach's
   own posture — a cold embedding model should not take the search box down.
 
-### Once it lands
+### Once it lands (0001)
 
 On this side the remaining work is small, because the branch was built ahead of
 it and is already tested:
@@ -75,3 +75,70 @@ covered — `router.test.js` asserts both the `ragAvailable: true` and the
 `DATABASE_PLUS_RAG` drops its "I don't have your policy documents" directive.
 
 See [`../ERP-INTEGRATION-FACTS.md`](../ERP-INTEGRATION-FACTS.md) §5.
+
+---
+
+## 0002 — gate `/api/progress` behind `requireStaff`
+
+**Status:** written and tested against `619-erp-backend` @ `3c841d2`; **not
+pushed.** 12 tests passing, lint clean, existing `imageBodyLimit` suite still
+green.
+
+**Priority: this one is a live privilege issue, not an enhancement.** It was
+found while checking whether an assessment-history endpoint existed, and it is
+unrelated to anything this service needs — it would be worth fixing if `mps-ai`
+did not exist at all.
+
+### What it is
+
+`app.use('/api/progress', require(...))` is mounted with **no `requireStaff`**,
+and every GET on that router takes an **optional** `client_id`. Omit it and you
+get the whole organisation's rows. Nine routes behave that way: assessments,
+goals, weekly check-ins, strength logs, progress photos, lifestyle, nutrition,
+mobility and posture.
+
+`tenantScope()` still applies, so this is **not a cross-tenant leak** — nothing
+crosses a studio boundary. But client-portal accounts are created with
+`role='member'` and their studio's `organization_id` (`routes/client-login.js`),
+and `auth()` loads that onto `req.user` for every account. So a logged-in client
+can call:
+
+```
+GET /api/progress/assessments
+```
+
+and receive **every assessment in their gym** — other clients' body composition,
+health notes and trainer notes.
+
+This is precisely the failure `requireStaff` was written to prevent. Its own
+comment in `middleware/rbac.js` says so:
+
+> *Read routes across the staff modules were gated on `auth` alone. That was
+> survivable only because no account had ever held the `member` role: there was
+> nobody to abuse it. Client logins create those accounts by the hundred…*
+
+The `requireStaff` rollout covered `/api/pt-os` (four mounts) and
+`/api/client-login`. `/api/progress` was missed.
+
+### The fix
+
+One line, matching the `/api/pt-os` precedent exactly: `auth, requireStaff` on
+the mount. A client's own progress is served by `/api/me`, which scopes to the
+caller.
+
+### Before merging
+
+**Confirm no client-facing frontend screen calls `/api/progress` directly.**
+This session could read the backend but not the frontend, so that check could
+not be done here. `client-portal.routes.js` does not proxy these routes, which
+is a good sign but not proof. If a client screen does use them, the fix is to
+serve it from `/api/me` rather than to loosen this gate.
+
+### Worth considering separately
+
+Making `client_id` **required** on those nine GETs would be useful hardening,
+but it is *not* a substitute for this patch: a member could still pass another
+client's id and read it, since the routes are org-scoped and not
+caller-scoped. It would also change behaviour for staff screens that
+legitimately list across clients, so it needs its own review rather than being
+folded in here.

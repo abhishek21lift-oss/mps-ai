@@ -115,6 +115,7 @@ Read-only. Each maps to exactly one endpoint verified to exist in
 | `getClientPayments` | `GET /api/clients/:id/payments` |
 | `getClientTrainingAnalytics` | `GET /api/pt-os/workout-log/analytics` |
 | `getClientVolumeSummary` | `GET /api/pt-os/workout-log/volume-summary` |
+| `getClientAssessmentHistory` | `GET /api/progress/assessments` |
 
 Tool selection is deterministic pattern matching (`agents/client/planner.js`),
 not a model call — one round trip instead of two, and only the data the question
@@ -303,8 +304,7 @@ Honest list; none of it is stubbed to look finished.
 - **Write actions** and the confirm-before-execute flow.
 - **Feedback** (👍/👎) and the evaluation harness.
 - **Streaming.** Non-streaming first, deliberately.
-- **Assessment history**, needed for "what changed since the last assessment?" —
-  `/snapshot` returns latest-only, and no history endpoint was found in the ERP.
+
 
 ## Adding an agent later
 

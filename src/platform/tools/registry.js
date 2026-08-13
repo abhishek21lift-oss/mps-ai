@@ -150,6 +150,29 @@ define({
 });
 
 define({
+  name: 'getClientAssessmentHistory',
+  summary: 'Past fitness assessments in date order, most recent first — measurements, test results and trainer notes as recorded on each date.',
+  label: 'assessment history',
+  args: z.object({
+    clientId: ClientId,
+    // Six is enough to answer "what changed since the last assessment?" and to
+    // show a trend, without shipping years of body-composition and health notes
+    // to a model provider to answer a question about the last two.
+    //
+    // The ERP's own ceiling is 200. This is deliberately far stricter: it is the
+    // caller's job to ask for what it needs, not to take what it is allowed.
+    limit: z.coerce.number().int().min(1).max(24).default(6),
+  }),
+  // client_id is REQUIRED here, and that is load-bearing rather than tidy.
+  // On the ERP side it is optional, and a request that omits it returns every
+  // assessment in the organisation. That would put other clients' body
+  // composition and health notes into a prompt about one client. The schema
+  // above makes omitting it impossible; the test suite asserts the parameter is
+  // in every URL this tool builds.
+  endpoint: ({ clientId, limit }) => `/api/progress/assessments${qs({ client_id: clientId, limit })}`,
+});
+
+define({
   name: 'getClientVolumeSummary',
   summary: 'Training volume per week or month, aggregated in the database — total load and session count over time.',
   label: 'training volume',

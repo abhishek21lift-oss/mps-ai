@@ -42,6 +42,12 @@ const RULES = [
     tools: ['getClientTrainingBrief'] },
   { re: /\b(measure|weight|body fat|bodyfat|waist|chest|hips|assessment|inch|kg)\b/i,
     tools: ['getClientSummary'] },
+  // "What changed since the last assessment?" needs more than the latest one.
+  // /snapshot returns latest-only, so a comparison question that matched only
+  // the rule above would be answered from a single row — and a model asked to
+  // describe a change with one data point will describe one anyway.
+  { re: /\b(since (the )?last|compared? (to|with)|previous assessment|assessment history|last assessment|re.?assess\w*|first assessment|over time)\b/i,
+    tools: ['getClientAssessmentHistory', 'getClientSummary'] },
   { re: /\b(goal|target|aim|objective)\b/i,
     tools: ['getClientSummary'] },
   { re: /\b(progress|improve|change|trend|better|worse|since)\b/i,

@@ -155,6 +155,7 @@ All read-only, all single-client, each verified to exist in `619-erp-backend`.
 | `getClientPayments` | `GET /api/clients/:id/payments` |
 | `getClientTrainingAnalytics` | `GET /api/pt-os/workout-log/analytics` |
 | `getClientVolumeSummary` | `GET /api/pt-os/workout-log/volume-summary` |
+| `getClientAssessmentHistory` | `GET /api/progress/assessments` |
 
 ## 7. Intent classification
 
