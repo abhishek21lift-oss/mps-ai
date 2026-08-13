@@ -74,7 +74,7 @@ describe('replayed history survives neutralisation intact', () => {
 
     await post(app, {
       clientId: 'c-1',
-      message: 'ok',
+      message: 'What is his current weight?',
       history: Array.from({ length: 6 }, () => ({ role: 'assistant', content: turn })),
     });
 
@@ -91,7 +91,10 @@ describe('§34 — history is context, never a source of truth', () => {
   test('the model is told earlier turns are unverified', async () => {
     const { app, provider } = appWith({ erp: okErp(), clock: fixedClock() });
 
-    await post(app, { clientId: 'c-1', message: 'How many clients do I have?' });
+    // Deliberately an in-scope question: "how many clients do I have?" is
+    // studio-wide, and the classifier now short-circuits it before any model
+    // call — correctly, since this agent covers one client at a time.
+    await post(app, { clientId: 'c-1', message: 'What is his outstanding balance?' });
 
     const sys = systemOf(provider);
     expect(sys).toMatch(/earlier turns are not evidence/i);

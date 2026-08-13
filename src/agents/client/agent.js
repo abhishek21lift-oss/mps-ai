@@ -24,6 +24,7 @@
 
 const { planTools, planIntent } = require('./planner');
 const { systemPrompt } = require('./prompt');
+const { classify, shortCircuitAnswer } = require('../../platform/intent/classifier');
 const { run: runTool } = require('../../platform/tools/registry');
 const { newFenceId, buildContext, neutralise } = require('../../platform/context/untrusted');
 const logger = require('../../lib/logger');
@@ -90,6 +91,11 @@ function createClientAgent({
   clock = NULL_CLOCK,
   audit = NULL_AUDIT,
   budget,
+  // Phase 7. No knowledge base exists yet, and this is null rather than a stub
+  // so policy questions get "I don't have your policy documents" instead of a
+  // plausible-sounding invention. Passing one in flips the classifier's
+  // ragAvailable and is the whole integration point.
+  knowledgeBase = null,
 }) {
   /**
    * @param {object} req
@@ -102,6 +108,13 @@ function createClientAgent({
   async function ask({ clientId, message, history = [], userToken, requestId }) {
     const started = Date.now();
     const actor = audit.actor(userToken);
+
+    // 0. Classify. Advisory only — it decides what kind of answer to produce and
+    //    which tools are worth running. It is NOT consulted about authorisation:
+    //    the gate below runs for every turn regardless of what this returns, so
+    //    a phrasing that slips past the classifier still cannot reach a client
+    //    the caller may not see.
+    const classification = classify(message, { ragAvailable: Boolean(knowledgeBase) });
 
     // 1. Authorise. Nothing else happens until this passes.
     const auth = await authoriseClient({ clientId, erp, userToken, requestId });
@@ -132,7 +145,51 @@ function createClientAgent({
       };
     }
 
-    // 2. Plan — deterministic, so cheap questions stay cheap.
+    // 2. Short-circuit, where the honest answer is a fact about this service
+    //    rather than something a model should compose. Deterministic, and it
+    //    costs no tokens.
+    //
+    //    Note what is NOT here: a write request. "Create a workout for this
+    //    client" is a request for content the trainer will type in by hand, and
+    //    refusing it outright is less useful than producing the plan and saying
+    //    where to enter it. It gets a directive instead.
+    if (classification.shortCircuit) {
+      const answer = shortCircuitAnswer(classification.intent, { clientName: auth.name });
+      logger.info({ requestId, classification: classification.intent }, 'client_agent_short_circuit');
+
+      audit.request({
+        requestId,
+        actor,
+        agent: 'client',
+        clientId,
+        intent: classification.intent,
+        outcome: 'answered',
+        status: 200,
+        latencyMs: Date.now() - started,
+      });
+
+      return {
+        ok: true,
+        status: 200,
+        message: answer,
+        clientId,
+        clientName: auth.name,
+        toolsUsed: [],
+        toolsUnavailable: [],
+        proposedAction: null,
+        requiresConfirmation: false,
+        meta: {
+          intent: 'lookup',
+          classification: classification.intent,
+          model: null,
+          used_fallback: false,
+          latency_ms: Date.now() - started,
+          tokens: { prompt: 0, completion: 0 },
+        },
+      };
+    }
+
+    // 3. Plan — deterministic, so cheap questions stay cheap.
     const { tools: planned } = planTools(message);
     const intent = planIntent(message);
 
@@ -184,6 +241,7 @@ function createClientAgent({
       now: clock.describe(),
       toolsRun: okResults.map((r) => r.tool),
       toolsFailed: failed.map((r) => r.tool),
+      directive: classification.directive,
     });
 
     const messages = buildMessages({ system, contextBlock, history, question: message });
@@ -227,6 +285,7 @@ function createClientAgent({
       agent: 'client',
       clientId,
       intent,
+      classification: classification.intent,
       outcome: 'answered',
       status: 200,
       toolsOk: okResults.length,
@@ -255,6 +314,7 @@ function createClientAgent({
       requiresConfirmation: false,
       meta: {
         intent,
+        classification: classification.intent,
         model: completion.model,
         used_fallback: completion.used_fallback,
         latency_ms: elapsed,

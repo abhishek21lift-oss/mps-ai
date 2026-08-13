@@ -11,8 +11,11 @@
  * @param {string} [o.now]       Studio-local date/time, from studioClock.describe().
  * @param {string[]} o.toolsRun  Tools that actually returned data this turn.
  * @param {string[]} o.toolsFailed  Tools that were denied or errored.
+ * @param {string|null} [o.directive]  Per-turn instruction from the intent
+ *   classifier — e.g. "this asks about a policy you do not have". Appended last
+ *   so it is the most recent thing the model reads before the question.
  */
-function systemPrompt({ clientName, now, toolsRun = [], toolsFailed = [] }) {
+function systemPrompt({ clientName, now, toolsRun = [], toolsFailed = [], directive = null }) {
   const lines = [
     'You are the Client Assistant inside MY PT STUDIO, a personal-training studio management system.',
     `You are helping a fitness professional with ONE client: ${clientName}.`,
@@ -108,6 +111,12 @@ function systemPrompt({ clientName, now, toolsRun = [], toolsFailed = [] }) {
   }
   if (!toolsRun.length) {
     lines.push('', 'No data could be retrieved for this question. Say that plainly rather than answering from general knowledge.');
+  }
+
+  // Last, because trailing tokens carry more weight — the same reason the
+  // untrusted-data restatement sits after the data rather than before it.
+  if (directive) {
+    lines.push('', 'FOR THIS QUESTION SPECIFICALLY:', directive);
   }
 
   return lines.join('\n');

@@ -107,6 +107,21 @@ function buildApp({ config, erp, provider, clock, audit }) {
     if (err && err.message === 'Origin not allowed') {
       return res.status(403).json({ error: { code: 'ORIGIN_NOT_ALLOWED', message: 'Origin not allowed.' } });
     }
+
+    // body-parser failures are the CALLER's problem and must say so. Reporting
+    // them as 500 tells a client the server broke and the request is worth
+    // retrying — when the truth is that it will fail identically every time.
+    if (err && (err.type === 'entity.too.large' || err.status === 413)) {
+      return res.status(413).json({
+        error: { code: 'PAYLOAD_TOO_LARGE', message: 'Request body is too large.' },
+      });
+    }
+    if (err && (err.type === 'entity.parse.failed' || err.status === 400)) {
+      return res.status(400).json({
+        error: { code: 'BAD_JSON', message: 'Request body is not valid JSON.' },
+      });
+    }
+
     logger.error({ err: err?.message }, 'unhandled_error');
     return res.status(500).json({ error: { code: 'INTERNAL', message: 'Something went wrong.' } });
   });

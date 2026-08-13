@@ -73,6 +73,7 @@ function createAudit({ config, sink = logger }) {
       agent: e.agent,
       clientId: e.clientId ?? null,
       intent: e.intent ?? null,
+      classification: e.classification ?? null,
       outcome: e.outcome,
       code: e.code ?? null,
       status: e.status ?? null,
