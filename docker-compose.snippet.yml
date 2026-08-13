@@ -10,6 +10,21 @@
 #
 # Follow the same rule the backend's own compose file states: the live file is
 # on the box and may already differ. Diff before pasting.
+#
+# ── This is only half the wiring ─────────────────────────────────────────────
+#
+# Putting `ai` here lets it reach the API as http://api:5000. It does NOT let
+# the FRONTEND reach `ai`: the frontend is a separate compose project
+# (/opt/myptstudio/docker-compose.yml), so it is on a different network and
+# cannot resolve the service name. Binding 127.0.0.1 below does not bridge that
+# either — a container reaching the docker gateway arrives on a different host
+# interface than a loopback binding accepts.
+#
+# The frontend rewrites /ai/* to AI_SERVICE_URL. Give it a reachable one:
+# route `location /ai/` on the api vhost to 127.0.0.1:4100 and set
+# AI_SERVICE_URL=https://api.myptstudio.com, which is the same door the
+# frontend already uses to reach the backend. See docs/RUNBOOK.md stage 3 —
+# including the proxy_buffering off that SSE needs.
 
 services:
   ai:

@@ -291,6 +291,7 @@ npm run lint
 
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — modules, request lifecycle, tool layer, model abstraction
 - [`docs/SECURITY.md`](docs/SECURITY.md) — trust boundaries, tenant isolation, injection, audit, residual risks
+- [`docs/RUNBOOK.md`](docs/RUNBOOK.md) — step-by-step: apply the ERP patches, wire the frontend, deploy, verify
 - [`docs/DECISIONS.md`](docs/DECISIONS.md) — why studio-wide questions stay in the ERP's assistant, and what follows from that
 - [`docs/ERP-INTEGRATION-FACTS.md`](docs/ERP-INTEGRATION-FACTS.md) — verified facts about `619-erp-backend`: tenancy, roles, endpoints, RAG
 - [`docs/PHASE-0-DISCOVERY.md`](docs/PHASE-0-DISCOVERY.md) — the audit this design came out of (superseded where the two disagree)
