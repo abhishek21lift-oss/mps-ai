@@ -24,56 +24,120 @@
 // unrecognised question gets a well-grounded general answer instead of "I don't
 // know", and the model is told which tools ran so it can say what it lacked.
 
+/**
+ * A stem and everything grown from it: `expir` covers expires, expiry, expiring.
+ *
+ * ── Why this helper exists ───────────────────────────────────────────────────
+ *
+ * Every rule below used to end in `\b`, which quietly meant NONE of them matched
+ * an inflected word. `\bpayment\b` does not match "payments". `\bsummar\b`
+ * matches neither "summary" nor "summarize". `\bgoal\b` misses "goals". On a
+ * realistic set of trainer questions, twenty of twenty-six fell through to the
+ * default.
+ *
+ * That was invisible because the default — snapshot plus profile — is a
+ * perfectly plausible answer to almost anything, so nothing looked broken. What
+ * it actually cost was worse than a wrong tool: "Any injuries?" never fetched
+ * the training brief, so the agent correctly reported that it had no injury
+ * data, about a client whose record contained some. A false "I don't have that"
+ * is the exact failure the grounding rules exist to prevent, arriving through
+ * the retrieval layer instead of the model.
+ */
+const stems = (...words) => `\\b(?:${words.join('|')})\\w*`;
+
+/**
+ * Words that must NOT grow a suffix, because the suffix is a different word.
+ * `due` is the reason this exists: `due\w*` swallows "during", and "what is he
+ * doing during the session?" is not a question about money.
+ */
+const exact = (...words) => `\\b(?:${words.join('|')})\\b`;
+
+const rule = (pattern, tools) => ({ re: new RegExp(pattern, 'i'), tools });
+
 const RULES = [
   // Money and package status.
-  { re: /\b(package|expir|renew|subscription|validity|valid till|end date|kab tak|khatam)\b/i,
-    tools: ['getClientProfile', 'getClientSubscriptions'] },
-  { re: /\b(payment|paid|due|dues|balance|outstanding|invoice|fees?|paisa|baki)\b/i,
-    tools: ['getClientProfile', 'getClientPayments'] },
-  { re: /\b(renewal history|renewed|past renewals)\b/i,
-    tools: ['getClientRenewals'] },
+  rule([
+    stems('packag', 'expir', 'renew', 'subscription', 'validity', 'khatam'),
+    exact('valid till', 'end date', 'kab tak'),
+  ].join('|'), ['getClientProfile', 'getClientSubscriptions']),
+
+  rule([
+    stems('payment', 'balance', 'outstanding', 'invoice', 'fee', 'paisa', 'baki'),
+    exact('due', 'dues', 'paid', 'unpaid'),
+  ].join('|'), ['getClientProfile', 'getClientPayments']),
+
+  rule(stems('renewal', 'renewed'), ['getClientRenewals']),
 
   // Training and physical state.
-  { re: /\b(attendance|attend|present|absent|missed|no.?show|inactive|coming|aaya|aayi)\b/i,
-    tools: ['getClientAttendance'] },
-  { re: /\b(workout|session|training|programme|program|exercise|routine|plan)\b/i,
-    tools: ['getClientTrainingBrief'] },
-  { re: /\b(injur|pain|posture|mobility|par.?q|limitation|restriction|medical)\b/i,
-    tools: ['getClientTrainingBrief'] },
-  { re: /\b(measure|weight|body fat|bodyfat|waist|chest|hips|assessment|inch|kg)\b/i,
-    tools: ['getClientSummary'] },
+  rule([
+    stems('attend', 'absent', 'missed', 'inactive', 'coming', 'aaya', 'aayi'),
+    exact('present', 'no.?show'),
+  ].join('|'), ['getClientAttendance']),
+
+  rule(
+    stems('workout', 'session', 'training', 'programme', 'program', 'exercis', 'routine', 'plan'),
+    ['getClientTrainingBrief'],
+  ),
+
+  rule([
+    stems('injur', 'pain', 'postur', 'mobility', 'limitation', 'restriction', 'medical'),
+    exact('par.?q'),
+  ].join('|'), ['getClientTrainingBrief']),
+
+  rule([
+    stems('measure', 'weight', 'waist', 'chest', 'hip', 'assessment', 'inch'),
+    exact('body fat', 'bodyfat', 'kg'),
+  ].join('|'), ['getClientSummary']),
   // "What changed since the last assessment?" needs more than the latest one.
   // /snapshot returns latest-only, so a comparison question that matched only
   // the rule above would be answered from a single row — and a model asked to
   // describe a change with one data point will describe one anyway.
   { re: /\b(since (the )?last|compared? (to|with)|previous assessment|assessment history|last assessment|re.?assess\w*|first assessment|over time)\b/i,
     tools: ['getClientAssessmentHistory', 'getClientSummary'] },
-  { re: /\b(goal|target|aim|objective)\b/i,
-    tools: ['getClientSummary'] },
-  { re: /\b(progress|improve|change|trend|better|worse|since)\b/i,
-    tools: ['getClientSummary', 'getClientAttendance'] },
+  rule(stems('goal', 'target', 'objective', 'aim'), ['getClientSummary']),
+
+  rule([
+    stems('progress', 'improve', 'trend', 'chang'),
+    exact('better', 'worse', 'since'),
+  ].join('|'), ['getClientSummary', 'getClientAttendance']),
 
   // Training depth, from the workout log. Kept distinct from the generic
   // "progress" rule above: that one is about measurements and showing up,
   // these are about what was actually lifted.
-  { re: /\b(stronger|strength|1rm|one.?rep|pr\b|personal record|lifting|lift|load)\b/i,
-    tools: ['getClientTrainingAnalytics'] },
-  { re: /\b(volume|tonnage|workload|training load|how much (work|volume))\b/i,
-    tools: ['getClientVolumeSummary'] },
-  // Suffixes matter here: a bare \bovertrain\b does not match "overtraining",
-  // and "last trained" does not match "last train legs".
-  { re: /\b(muscle group|coverage|balanced|neglect\w*|overtrain\w*|overcook\w*|recovery|rest day|last train\w*)\b/i,
-    tools: ['getClientTrainingAnalytics'] },
+  rule([
+    stems('stronger', 'strength', 'lift'),
+    exact('1rm', 'one.?rep', 'pr', 'personal record', 'load', 'loads'),
+  ].join('|'), ['getClientTrainingAnalytics']),
+
+  rule([
+    stems('volume', 'tonnage', 'workload'),
+    exact('training load', 'how much work'),
+  ].join('|'), ['getClientVolumeSummary']),
+
+  rule([
+    stems('neglect', 'overtrain', 'overcook', 'recovery'),
+    // `balanced` exactly, never `balanc\w*` — that also catches "balance", and
+    // an outstanding-balance question would drag the workout log along with it.
+    exact('balanced', 'muscle group', 'muscle groups', 'coverage', 'rest day', 'rest days'),
+    'last train\\w*',
+  ].join('|'), ['getClientTrainingAnalytics']),
 
   // Contact.
-  { re: /\b(call|contact|phone|mobile|number|message|communicat|follow.?up|whatsapp)\b/i,
-    tools: ['getClientProfile', 'getClientCommunication'] },
+  rule([
+    stems('contact', 'phone', 'mobile', 'message', 'communicat', 'whatsapp'),
+    exact('call', 'called', 'number', 'follow.?up', 'follow.?ups'),
+  ].join('|'), ['getClientProfile', 'getClientCommunication']),
 
   // Whole-picture asks — the "give me everything" family.
-  { re: /\b(summar|overview|status report|full picture|everything|brief me|complete status|kaisa hai)\b/i,
-    tools: ['getClientSummary', 'getClientProfile', 'getClientAttendance', 'getClientTrainingBrief'] },
-  { re: /\b(focus|concern|worry|risk|next session|discuss|should i|what to do|advice)\b/i,
-    tools: ['getClientSummary', 'getClientAttendance', 'getClientTrainingBrief'] },
+  rule([
+    stems('summar', 'overview'),
+    exact('status report', 'full picture', 'everything', 'brief me', 'complete status', 'kaisa hai'),
+  ].join('|'), ['getClientSummary', 'getClientProfile', 'getClientAttendance', 'getClientTrainingBrief']),
+
+  rule([
+    stems('focus', 'concern', 'worry', 'risk', 'discuss'),
+    exact('next session', 'should i', 'what to do', 'advice'),
+  ].join('|'), ['getClientSummary', 'getClientAttendance', 'getClientTrainingBrief']),
 ];
 
 /** Unrecognised questions still get grounded — see the header. */
@@ -105,9 +169,12 @@ function planTools(message) {
  */
 function planIntent(message) {
   const text = String(message || '');
-  if (/\b(summar|overview|status report|full picture|brief me)\b/i.test(text)) return 'summary';
-  if (/\b(progress|analy|why|should i|focus|concern|compare|trend)\b/i.test(text)) return 'analysis';
-  if (/\b(when|what is|who|how many|expire|due|balance|number)\b/i.test(text)) return 'lookup';
+  // Same stem rule as the tool rules above, and for the same reason: `summar`
+  // followed by \b matched neither "summary" nor "summarize", so the one intent
+  // this function exists to detect was the one it could never see.
+  if (new RegExp(`${stems('summar', 'overview')}|${exact('status report', 'full picture', 'brief me')}`, 'i').test(text)) return 'summary';
+  if (new RegExp(`${stems('progress', 'analy', 'compar', 'trend', 'focus', 'concern')}|${exact('why', 'should i')}`, 'i').test(text)) return 'analysis';
+  if (new RegExp(`${stems('expir', 'balance', 'number')}|${exact('when', 'what is', 'who', 'how many', 'due', 'dues')}`, 'i').test(text)) return 'lookup';
   return 'analysis';
 }
 

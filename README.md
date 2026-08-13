@@ -129,6 +129,16 @@ not a model call — one round trip instead of two, and only the data the questi
 needs. "When does their package expire?" must not ship a client's medical notes
 to a model provider.
 
+Rules match **stems**, so `expir` covers expires/expiry/expiring and `payment`
+covers payments. That is not a nicety: every rule once ended in `\b`, which
+matched no inflected word at all, and twenty of twenty-six realistic questions
+fell to the default. It hid because the default is plausible — but "Any
+injuries?" never fetched the training brief, so the agent truthfully said it had
+no injury data about a client who had some. A false *"I don't have that"* is the
+grounding failure arriving through retrieval instead of the model.
+`__tests__/planner.test.js` pins the inflections, and the false positives that
+fixing them can cause.
+
 ## Intent routing
 
 Questions are classified into seven kinds before anything is retrieved
@@ -265,6 +275,8 @@ npm run lint
 | `router.test.js` | 72 | intent classification, including both directions of failure |
 | `dates.test.js` | 27 | studio-timezone civil dates and named ranges |
 | `security.test.js` | 19 | tenancy, closed tool surface, injection fencing, read-only |
+| `planner.test.js` | 45 | tool selection, inflections, and the false positives fixing them causes |
+| `grounding-check.test.js` | 30 | answer figures vs retrieved records |
 | `streaming.test.js` | 19 | SSE framing; which failures still get to be failures |
 | `audit.test.js` | 13 | the trail is complete, and holds no secrets or records |
 | `limits.test.js` | 13 | context budget, truncation, and announcing both |
