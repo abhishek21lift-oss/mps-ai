@@ -71,11 +71,31 @@ one for every turn — including smalltalk, including short-circuited turns. A
 client the caller may not see costs one ERP read and ends there: no tools, no
 prompt, no tokens, nothing about that client anywhere in the request.
 
+Steps 0–6 live in `prepare()`, shared by both the buffered and the streaming
+route. That is deliberate: the ordering *is* the security design, and a second
+implementation of it is the one that would eventually be missing a step.
+
+It also gives the SSE route the property it needs. Everything that can fail with
+a status code has finished by the time `prepare()` resolves, so the stream opens
+only when nothing is left that would rather have been an HTTP status:
+
+```mermaid
+flowchart LR
+  P["prepare()"] -->|"terminal"| H["ordinary HTTP response<br/>400 · 401 · 403 · 404"]
+  P -->|"ready"| S["write SSE headers<br/>(committed to 200)"]
+  S --> E["start → delta… → done"]
+  S -.->|"model dies"| ER["start → delta… → error<br/>partial: true"]
+```
+
+Once SSE headers are written the response is committed to `200`. A `404`
+decided after that point is no longer a `404` — it is a success carrying a sad
+message, and a frontend switching on status never sees it.
+
 ## 4. Modules
 
 | Module | Responsibility | Knows about |
 |---|---|---|
-| `api/clientAgent.js` | HTTP contract, body validation, bearer extraction | express, zod |
+| `api/clientAgent.js` | HTTP contract, body validation, bearer extraction, SSE framing | express, zod |
 | `agents/client/agent.js` | orchestration; the step order above | planner, prompt, registry, fencing |
 | `agents/client/planner.js` | question → tool names, and → model tier | nothing |
 | `agents/client/prompt.js` | the system prompt, as data in one file | nothing |
@@ -85,8 +105,8 @@ prompt, no tokens, nothing about that client anywhere in the request.
 | `platform/limits.js` | truncation and context budget | nothing |
 | `platform/time/studioClock.js` | civil dates in the studio's timezone | `Intl` |
 | `platform/audit/log.js` | the audit trail | crypto, logger |
-| `platform/router.js` | intent → model tier, single fallback | provider |
-| `platform/provider/openrouter.js` | the only place HTTP-to-a-model lives | fetch |
+| `platform/router.js` | intent → model tier; fallback, and why streaming's differs | provider |
+| `platform/provider/openrouter.js` | the only place HTTP-to-a-model lives, buffered and streamed | fetch |
 | `integrations/erp/client.js` | the only route out to studio data | fetch |
 
 Two routers, deliberately distinct: `platform/intent/classifier.js` decides what
@@ -292,7 +312,7 @@ Honest list; none of it is stubbed to look finished.
   [ERP-INTEGRATION-FACTS.md](./ERP-INTEGRATION-FACTS.md) §5.
 - **Trainer-level object authorisation on client-by-id reads.** Not present in
   the ERP for these endpoints; see SECURITY.md §7.
-- **Streaming**, **write actions**, **feedback and evaluation harness**,
+- **Write actions**, **feedback and evaluation harness**,
   **frontend integration**, **assessment history**.
 
 ## 14. Adding an agent

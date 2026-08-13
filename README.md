@@ -181,6 +181,44 @@ hunting a permissions bug that does not exist.
 confirm-before-write contract has a shape from day one and adding a write is
 additive rather than a redesign.
 
+### `POST /ai/client-agent/chat/stream`
+
+Same request body, same guards, delivered as Server-Sent Events. Additive — the
+route above is unchanged.
+
+```
+event: start
+data: {"clientId":"…","clientName":"Rahul Sharma",
+       "toolsUsed":["getClientProfile","getClientSummary"],
+       "toolsUnavailable":[],"classification":"DATABASE_QUERY"}
+
+event: delta
+data: {"text":"His package expires on "}
+
+event: done
+data: {"proposedAction":null,"requiresConfirmation":false,
+       "meta":{…},"requestId":"…"}
+```
+
+**Provenance arrives first, not last.** The tools have already run by the time
+the stream opens, so a UI can show what the answer rests on while the answer is
+still being written.
+
+**Denials are still HTTP status codes.** Everything that can fail with a status
+happens *before* the first header is written — because once SSE headers go out
+the response is committed to `200`, and a `404` that arrives after that is no
+longer a `404`. A client you may not see returns a JSON `404` from this route,
+exactly as it does from the non-streaming one.
+
+**A mid-answer failure emits `event: error` with `partial: true`**, and no
+`done`. Model fallback applies only *before* the first token: after that, a
+retry would replay the answer from the top and the reader would watch half a
+sentence be followed by a whole one. A visibly truncated answer beats a
+seamless-looking one stitched from two attempts.
+
+Short-circuited turns (studio-wide asks, policy questions, smalltalk) stream too
+— one `delta` and a `done` — so a client has one code path rather than two.
+
 ### `GET /health` · `GET /capabilities`
 
 Liveness (no upstream calls, so a slow provider does not trigger restarts) and
@@ -205,6 +243,7 @@ npm run lint
 | `router.test.js` | 72 | intent classification, including both directions of failure |
 | `dates.test.js` | 27 | studio-timezone civil dates and named ranges |
 | `security.test.js` | 19 | tenancy, closed tool surface, injection fencing, read-only |
+| `streaming.test.js` | 19 | SSE framing; which failures still get to be failures |
 | `audit.test.js` | 13 | the trail is complete, and holds no secrets or records |
 | `limits.test.js` | 13 | context budget, truncation, and announcing both |
 | `grounding.test.js` | 12 | history is not evidence; no-records ≠ no-data |
@@ -303,7 +342,6 @@ Honest list; none of it is stubbed to look finished.
 - **Frontend integration.** No "Ask AI" entry on the client profile yet.
 - **Write actions** and the confirm-before-execute flow.
 - **Feedback** (👍/👎) and the evaluation harness.
-- **Streaming.** Non-streaming first, deliberately.
 
 
 ## Adding an agent later

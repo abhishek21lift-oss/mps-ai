@@ -113,3 +113,42 @@ module.exports = {
   systemOf,
   contextOf,
 };
+
+/** A provider that streams, recording the prompt it was given. */
+function fakeStreamProvider(chunks = ['Hello', ' there', '.']) {
+  const seen = [];
+  return {
+    seen,
+    name: 'fake-stream',
+    generate: async ({ messages, model }) => {
+      seen.push({ messages, model });
+      return { content: chunks.join(''), model: model || 'm', usage: { prompt: 10, completion: 5 }, latency_ms: 1 };
+    },
+    generateStream: async function* ({ messages, model }) {
+      seen.push({ messages, model });
+      for (const text of chunks) yield { type: 'delta', text };
+      yield { type: 'done', model: model || 'm', usage: { prompt: 10, completion: 5 } };
+    },
+  };
+}
+
+/** Parse an SSE body into [{ event, data }]. */
+function parseSse(body) {
+  return String(body)
+    .split('\n\n')
+    .filter((f) => f.trim())
+    .map((frame) => {
+      const event = /^event: (.+)$/m.exec(frame)?.[1];
+      const data = /^data: (.+)$/m.exec(frame)?.[1];
+      return { event, data: data ? JSON.parse(data) : null };
+    });
+}
+
+const postStream = (app, body, token = 'user-jwt-alpha') =>
+  request(app).post('/ai/client-agent/chat/stream')
+    .set('Authorization', `Bearer ${token}`)
+    .send(body);
+
+module.exports.fakeStreamProvider = fakeStreamProvider;
+module.exports.parseSse = parseSse;
+module.exports.postStream = postStream;

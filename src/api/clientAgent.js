@@ -90,7 +90,125 @@ function createClientAgentRouter({ agent }) {
     }
   });
 
+  /* ─────────────────────────────────────────────────────────────────────────
+     POST /ai/client-agent/chat/stream
+
+     Same contract, same guards, delivered as Server-Sent Events. Additive: the
+     non-streaming route above is unchanged, because a frontend that works today
+     must keep working and §39 says so.
+
+     The ordering that matters: the agent runs every fallible, status-bearing
+     step BEFORE this route writes a single header. Once SSE headers go out the
+     response is committed to 200, and a 404 that arrives after that is no
+     longer a 404 — it is a success carrying a sad message. So a denial returns
+     from askStream() as an ordinary object and is sent as an ordinary HTTP
+     error, exactly as it would be on the non-streaming route.
+     ───────────────────────────────────────────────────────────────────────── */
+  router.post('/chat/stream', async (req, res) => {
+    const requestId = req.headers['x-request-id'] || crypto.randomUUID();
+
+    const userToken = bearerFrom(req);
+    if (!userToken) {
+      return res.status(401).json({ error: { code: 'NO_TOKEN', message: 'Authentication required.' } });
+    }
+
+    const parsed = Body.safeParse(req.body || {});
+    if (!parsed.success) {
+      return res.status(400).json({
+        error: {
+          code: 'BAD_REQUEST',
+          message: parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; '),
+        },
+      });
+    }
+
+    const { clientId, message, history } = parsed.data;
+
+    let result;
+    try {
+      result = await agent.askStream({ clientId, message, history, userToken, requestId });
+    } catch (err) {
+      logger.error({ requestId, err: err?.message }, 'client_agent_stream_unhandled');
+      return res.status(500).json({
+        error: { code: 'INTERNAL', message: 'Something went wrong.' },
+        requestId,
+      });
+    }
+
+    // Denials, short-circuits and anything else that resolved without needing a
+    // model come back as a plain response — still with a real status code.
+    if (!result.streaming) {
+      if (!result.ok) {
+        return res.status(result.status).json({
+          error: { code: result.code, message: result.message },
+          requestId,
+        });
+      }
+      // A short-circuit has nothing to stream. Sent as one event over SSE
+      // anyway, so a client has exactly one code path rather than two.
+      res.writeHead(200, SSE_HEADERS);
+      send(res, 'start', {
+        clientId: result.clientId,
+        clientName: result.clientName,
+        toolsUsed: result.toolsUsed,
+        toolsUnavailable: result.toolsUnavailable,
+        classification: result.meta?.classification ?? null,
+      });
+      send(res, 'delta', { text: result.message });
+      send(res, 'done', {
+        proposedAction: result.proposedAction,
+        requiresConfirmation: result.requiresConfirmation,
+        meta: result.meta,
+        requestId,
+      });
+      return res.end();
+    }
+
+    res.writeHead(200, SSE_HEADERS);
+
+    // A client that navigates away mid-answer should stop the work, not leave
+    // it writing into a dead socket until the model finishes.
+    let aborted = false;
+    req.on('close', () => { aborted = true; });
+
+    try {
+      for await (const ev of result.stream) {
+        if (aborted) break;
+        const { type, ...rest } = ev;
+        send(res, type, type === 'done' ? { ...rest, requestId } : rest);
+      }
+    } catch (err) {
+      // The generator itself failing is a bug rather than a model outage — the
+      // model's own failures are yielded as an 'error' event inside it.
+      logger.error({ requestId, err: err?.message }, 'client_agent_stream_broke');
+      if (!aborted) send(res, 'error', { code: 'INTERNAL', message: 'Something went wrong.' });
+    }
+
+    return res.end();
+  });
+
   return router;
 }
 
-module.exports = { createClientAgentRouter, Body };
+const SSE_HEADERS = {
+  'Content-Type': 'text/event-stream; charset=utf-8',
+  'Cache-Control': 'no-cache, no-transform',
+  Connection: 'keep-alive',
+  // nginx sits in front of this service and will otherwise buffer the whole
+  // response, which turns streaming back into waiting — with extra steps.
+  'X-Accel-Buffering': 'no',
+};
+
+/**
+ * One SSE frame.
+ *
+ * JSON.stringify before writing is not decoration: a payload containing a
+ * newline would otherwise end the frame early, and retrieved client notes are
+ * full of newlines. Encoding removes the possibility rather than relying on
+ * nobody ever putting one there.
+ */
+function send(res, event, data) {
+  res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+}
+
+module.exports = { createClientAgentRouter, Body, SSE_HEADERS };

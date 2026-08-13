@@ -98,17 +98,21 @@ function createClientAgent({
   knowledgeBase = null,
 }) {
   /**
-   * @param {object} req
-   * @param {string} req.clientId    From the browser. Untrusted until authorised.
-   * @param {string} req.message     The trainer's question.
-   * @param {Array}  [req.history]   [{role, content}], most recent last.
-   * @param {string} req.userToken   The end user's JWT, forwarded to the ERP.
-   * @param {string} req.requestId
+   * Everything that must happen before a model is called — and everything that
+   * can still fail with a status code.
+   *
+   * Split out of ask() so the streaming path cannot grow a second copy of the
+   * ordering. That ordering *is* the security design (classify → authorise →
+   * short-circuit → plan → retrieve → fence), and a duplicate of it is exactly
+   * the kind of copy that ends up missing a step.
+   *
+   * It also gives the SSE route the one property it needs: by the time this
+   * resolves, every 400/401/403/404 outcome is already known. The stream can
+   * then be opened knowing nothing is left that would rather have been an HTTP
+   * status — because once SSE headers are written the response is committed to
+   * 200, and "not your client" becomes a 200 carrying an error event.
    */
-  async function ask({ clientId, message, history = [], userToken, requestId }) {
-    const started = Date.now();
-    const actor = audit.actor(userToken);
-
+  async function prepare({ clientId, message, history = [], userToken, requestId, started, actor }) {
     // 0. Classify. Advisory only — it decides what kind of answer to produce and
     //    which tools are worth running. It is NOT consulted about authorisation:
     //    the gate below runs for every turn regardless of what this returns, so
@@ -137,11 +141,14 @@ function createClientAgent({
       });
 
       return {
-        ok: false,
-        status,
-        code: auth.code,
-        message: auth.message,
-        toolsUsed: [],
+        kind: 'terminal',
+        response: {
+          ok: false,
+          status,
+          code: auth.code,
+          message: auth.message,
+          toolsUsed: [],
+        },
       };
     }
 
@@ -169,22 +176,25 @@ function createClientAgent({
       });
 
       return {
-        ok: true,
-        status: 200,
-        message: answer,
-        clientId,
-        clientName: auth.name,
-        toolsUsed: [],
-        toolsUnavailable: [],
-        proposedAction: null,
-        requiresConfirmation: false,
-        meta: {
-          intent: 'lookup',
-          classification: classification.intent,
-          model: null,
-          used_fallback: false,
-          latency_ms: Date.now() - started,
-          tokens: { prompt: 0, completion: 0 },
+        kind: 'terminal',
+        response: {
+          ok: true,
+          status: 200,
+          message: answer,
+          clientId,
+          clientName: auth.name,
+          toolsUsed: [],
+          toolsUnavailable: [],
+          proposedAction: null,
+          requiresConfirmation: false,
+          meta: {
+            intent: 'lookup',
+            classification: classification.intent,
+            model: null,
+            used_fallback: false,
+            latency_ms: Date.now() - started,
+            tokens: { prompt: 0, completion: 0 },
+          },
         },
       };
     }
@@ -246,6 +256,35 @@ function createClientAgent({
 
     const messages = buildMessages({ system, contextBlock, history, question: message });
 
+    return {
+      kind: 'ready',
+      messages,
+      intent,
+      classification,
+      clientName: auth.name,
+      okResults,
+      failed,
+      context,
+    };
+  }
+
+  /**
+   * @param {object} req
+   * @param {string} req.clientId    From the browser. Untrusted until authorised.
+   * @param {string} req.message     The trainer's question.
+   * @param {Array}  [req.history]   [{role, content}], most recent last.
+   * @param {string} req.userToken   The end user's JWT, forwarded to the ERP.
+   * @param {string} req.requestId
+   */
+  async function ask({ clientId, message, history = [], userToken, requestId }) {
+    const started = Date.now();
+    const actor = audit.actor(userToken);
+
+    const prepared = await prepare({ clientId, message, history, userToken, requestId, started, actor });
+    if (prepared.kind === 'terminal') return prepared.response;
+
+    const { messages, intent, classification, clientName, okResults, failed, context } = prepared;
+
     // 5. Answer.
     let completion;
     try {
@@ -304,7 +343,7 @@ function createClientAgent({
       status: 200,
       message: completion.content,
       clientId,
-      clientName: auth.name,
+      clientName,
       // Provenance the UI can show, so a trainer can see what the answer rests on.
       toolsUsed: okResults.map((r) => r.tool),
       toolsUnavailable: failed.map((r) => ({ tool: r.tool, reason: r.message })),
@@ -323,7 +362,140 @@ function createClientAgent({
     };
   }
 
-  return { ask };
+  /**
+   * The streaming turn.
+   *
+   * Shares every step before the model with ask(), because it calls the same
+   * prepare(). What differs is only what happens to the answer.
+   *
+   * Returns EITHER a terminal response — which the caller must send as an
+   * ordinary HTTP response, headers and all — or `{ ok: true, stream }`, an
+   * async generator of events. The caller opens SSE only in the second case.
+   * That split is the whole reason prepare() exists: a denial must still be a
+   * 404, not a 200 whose body happens to contain the word "denied".
+   *
+   * Events yielded:
+   *   { type: 'start', clientName, toolsUsed, toolsUnavailable, classification }
+   *   { type: 'delta', text }        zero or more
+   *   { type: 'done',  meta, ... }   exactly once on success
+   *   { type: 'error', code, message } instead of 'done', on failure
+   */
+  async function askStream({ clientId, message, history = [], userToken, requestId }) {
+    const started = Date.now();
+    const actor = audit.actor(userToken);
+
+    const prepared = await prepare({ clientId, message, history, userToken, requestId, started, actor });
+    if (prepared.kind === 'terminal') return prepared.response;
+
+    const { messages, intent, classification, clientName, okResults, failed, context } = prepared;
+
+    const toolsUsed = okResults.map((r) => r.tool);
+    const toolsUnavailable = failed.map((r) => ({ tool: r.tool, reason: r.message }));
+
+    async function* stream() {
+      // Sent before the first token because it is already known — the tools ran
+      // during prepare(). A UI can show what the answer rests on while the
+      // answer is still arriving, rather than after it.
+      yield {
+        type: 'start',
+        clientId,
+        clientName,
+        toolsUsed,
+        toolsUnavailable,
+        classification: classification.intent,
+      };
+
+      let text = '';
+      let model = null;
+      let usedFallback = false;
+      let usage = { prompt: 0, completion: 0 };
+
+      try {
+        for await (const ev of router.chatStream({ intent, messages })) {
+          if (ev.type === 'delta') {
+            text += ev.text;
+            yield { type: 'delta', text: ev.text };
+          } else if (ev.type === 'done') {
+            model = ev.model;
+            usedFallback = ev.used_fallback;
+            usage = ev.usage;
+          }
+        }
+      } catch (err) {
+        const elapsed = Date.now() - started;
+        logger.error({ requestId, code: err.code }, 'client_agent_stream_failed');
+        audit.request({
+          requestId, actor, agent: 'client', clientId, intent,
+          classification: classification.intent,
+          outcome: 'failed', code: err.code || 'MODEL_FAILED', status: err.status || 503,
+          toolsOk: okResults.length, toolsFailed: failed.length,
+          latencyMs: elapsed,
+        });
+        // Deliberately not a rethrow. The response is already a 200 with an
+        // open stream, so the only way to tell the reader is in-band — and a
+        // reader who has watched half an answer appear needs to be told it
+        // stopped, not left staring at a cursor.
+        yield {
+          type: 'error',
+          code: err.code || 'MODEL_FAILED',
+          message: 'The assistant stopped partway through. Please try again.',
+          partial: text.length > 0,
+        };
+        return;
+      }
+
+      const elapsed = Date.now() - started;
+      logger.info({
+        requestId,
+        intent,
+        model,
+        used_fallback: usedFallback,
+        tools_ok: okResults.length,
+        tools_failed: failed.length,
+        tokens: usage.prompt + usage.completion,
+        latency_ms: elapsed,
+        streamed: true,
+      }, 'client_agent_answered');
+
+      audit.request({
+        requestId,
+        actor,
+        agent: 'client',
+        clientId,
+        intent,
+        classification: classification.intent,
+        outcome: 'answered',
+        status: 200,
+        toolsOk: okResults.length,
+        toolsFailed: failed.length,
+        model,
+        usedFallback,
+        tokens: usage,
+        contextChars: context.usedChars,
+        truncatedTools: context.truncated,
+        droppedTools: context.dropped,
+        latencyMs: elapsed,
+      });
+
+      yield {
+        type: 'done',
+        proposedAction: null,
+        requiresConfirmation: false,
+        meta: {
+          intent,
+          classification: classification.intent,
+          model,
+          used_fallback: usedFallback,
+          latency_ms: elapsed,
+          tokens: usage,
+        },
+      };
+    }
+
+    return { ok: true, streaming: true, stream: stream() };
+  }
+
+  return { ask, askStream };
 }
 
 module.exports = { createClientAgent, authoriseClient, buildMessages, HISTORY_TURNS };
