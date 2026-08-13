@@ -30,7 +30,10 @@ const { z } = require('zod');
 const Schema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   PORT: z.coerce.number().int().positive().default(4100),
-  LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
+  // 'silent' included because pino accepts it and lib/logger.js reads this
+  // variable straight from the environment. Leaving it out of the enum meant
+  // the logger honoured a value the config refused to boot on.
+  LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
 
   // ── AI provider ───────────────────────────────────────────────────────────
   // Provider is named rather than assumed so a second implementation can be

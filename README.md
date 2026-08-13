@@ -110,6 +110,30 @@ not a model call — one round trip instead of two, and only the data the questi
 needs. "When does their package expire?" must not ship a client's medical notes
 to a model provider.
 
+## Intent routing
+
+Questions are classified into seven kinds before anything is retrieved
+(`platform/intent/classifier.js`): `DATABASE_QUERY`, `RAG_QUERY`,
+`DATABASE_PLUS_RAG`, `GENERAL_SMALLTALK`, `CLARIFICATION_REQUIRED`,
+`UNAUTHORIZED_REQUEST`, `UNSUPPORTED_REQUEST`.
+
+Studio-wide asks, policy questions, smalltalk and contentless messages are
+answered deterministically and **spend no tokens**. Write requests deliberately
+are *not* — "create a workout for this client" wants content the trainer will
+type in by hand, so it gets the data plus a read-only directive rather than a
+refusal.
+
+> **The classifier is not a security control.** `UNAUTHORIZED_REQUEST` states a
+> fact about *capability* ("no tool here returns other clients"), never about
+> *entitlement* ("you may not see that") — this service cannot read the caller's
+> role. Authorisation runs first on every turn regardless of what the classifier
+> decides, so a phrasing that slips past it still cannot reach a client the
+> caller may not see.
+
+Policy questions currently answer that no knowledge base is configured, rather
+than improvising a plausible cancellation policy and attributing it to the
+studio.
+
 ## API
 
 ### `POST /ai/client-agent/chat`
@@ -127,7 +151,8 @@ to a model provider.
   "toolsUsed": ["getClientProfile", "getClientSummary"],
   "toolsUnavailable": [],
   "proposedAction": null, "requiresConfirmation": false,
-  "meta": { "intent": "analysis", "model": "…", "used_fallback": false,
+  "meta": { "intent": "analysis", "classification": "DATABASE_QUERY",
+            "model": "…", "used_fallback": false,
             "latency_ms": 1420, "tokens": { "prompt": 0, "completion": 0 } },
   "requestId": "…" }
 ```
@@ -158,18 +183,26 @@ npm run dev
 ```
 
 ```bash
-npm test        # 94 security + behaviour tests
+npm test        # 258 security + behaviour tests
 npm run lint
 ```
 
-| Suite | Covers |
-|---|---|
-| `security.test.js` | tenancy, closed tool surface, injection fencing, read-only |
-| `grounding.test.js` | history is not evidence; no-records ≠ no-data; history integrity |
-| `dates.test.js` | studio-timezone civil dates and named ranges |
-| `limits.test.js` | context budget, truncation, and announcing both |
-| `audit.test.js` | the trail is complete, and holds no secrets or records |
-| `errors.test.js` | 400/401/403/404 stay distinct; no internals leak; rate limits |
+| Suite | Tests | Covers |
+|---|---|---|
+| `redteam.test.js` | 92 | 46 adversarial cases — tenant hopping, IDOR, injection, extraction |
+| `router.test.js` | 72 | intent classification, including both directions of failure |
+| `dates.test.js` | 27 | studio-timezone civil dates and named ranges |
+| `security.test.js` | 19 | tenancy, closed tool surface, injection fencing, read-only |
+| `audit.test.js` | 13 | the trail is complete, and holds no secrets or records |
+| `limits.test.js` | 13 | context budget, truncation, and announcing both |
+| `grounding.test.js` | 12 | history is not evidence; no-records ≠ no-data |
+| `errors.test.js` | 10 | 400/401/403/404 stay distinct; no internals leak; rate limits |
+
+## Documentation
+
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — modules, request lifecycle, tool layer, model abstraction
+- [`docs/SECURITY.md`](docs/SECURITY.md) — trust boundaries, tenant isolation, injection, audit, residual risks
+- [`docs/PHASE-0-DISCOVERY.md`](docs/PHASE-0-DISCOVERY.md) — the audit this design came out of
 
 ## Grounding
 
