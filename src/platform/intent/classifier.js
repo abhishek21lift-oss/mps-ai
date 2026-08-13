@@ -91,9 +91,20 @@ const POLITE_WRITE = new RegExp(`\\b(can|could|would|will|pls|please)\\s+(you\\s
 /* ── Policy and document questions — the RAG side of §13 ─────────────────────
    Static knowledge: what the studio's rules SAY. Distinct from what the records
    SHOW, which is the database side. */
+// Plurals are spelled out rather than swept up with \w*, and the asymmetry is
+// deliberate. A MISSED policy question is the costly direction — it falls to
+// DATABASE_QUERY, so the model is handed a client's records and asked what the
+// studio's refund rules are, with no directive telling it there are no policy
+// documents. That is the §3 fabrication this class exists to prevent, and
+// "SOPs" used to land there because `\bsop\b` cannot match it.
+//
+// But a blanket stem match is worse here than it was in the planner, because
+// this vocabulary collides with fitness language: `contract\w*` catches "muscle
+// contraction", `term\w*` catches "terminate" and "long term". So the ones that
+// can safely take a plural take one, and the ones that cannot stay exact.
 const POLICY = [
-  /\b(policy|policies|sop|s\.o\.p\.|guideline|guidelines|rule|rules|procedure|protocol)\b/i,
-  /\b(terms|t&c|contract|agreement|waiver|handbook|manual|documentation)\b/i,
+  /\b(polic(y|ies)|sops?|s\.o\.p\.s?|guidelines?|rules?|procedures?|protocols?)\b/i,
+  /\b(terms|t&c|contracts?|agreements?|waivers?|handbooks?|manuals?|documentation)\b/i,
   /\b(are we (allowed|supposed)|what('s| is) our|how (are we|should we|do we) (meant|supposed) to)\b/i,
   /\b(entitled to|eligible for|qualif(y|ies|ied) for)\b.*\b(refund|cancellation|transfer|freeze|extension)\b/i,
 ];

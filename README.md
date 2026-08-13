@@ -276,6 +276,7 @@ npm run lint
 | `dates.test.js` | 27 | studio-timezone civil dates and named ranges |
 | `security.test.js` | 19 | tenancy, closed tool surface, injection fencing, read-only |
 | `planner.test.js` | 45 | tool selection, inflections, and the false positives fixing them causes |
+| `patterns.test.js` | 51 | coverage audits for all three pattern surfaces, both directions |
 | `grounding-check.test.js` | 30 | answer figures vs retrieved records |
 | `streaming.test.js` | 19 | SSE framing; which failures still get to be failures |
 | `audit.test.js` | 13 | the trail is complete, and holds no secrets or records |

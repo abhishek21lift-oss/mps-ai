@@ -78,7 +78,19 @@ function neutralise(text, fenceId) {
     // Chat-template role markers. A note containing "<|im_start|>system" or a
     // bare "system:" line is trying to open a turn it is not entitled to.
     .replace(/<\|[^|>]*\|>/g, '[marker-removed]')
-    .replace(/^\s*(system|assistant|developer)\s*:/gim, '$1⁠:');
+    // `tool` and `function` matter as much as `system` here, and arguably more.
+    // This service's entire design says tool results are the authoritative
+    // data; a note whose line reads `tool: {"balance": 0}` is dressing itself
+    // as exactly the thing the model has been told to believe. `user` and
+    // `human` are the other half of the same trick — opening a turn the note
+    // is not entitled to.
+    //
+    // A false positive costs nothing worth counting: the defang inserts a
+    // word joiner (U+2060) between the word and its colon, which is invisible
+    // when rendered. A mobility note legitimately beginning "Function: limited
+    // overhead reach" reads identically afterwards, and is no longer a role
+    // marker.
+    .replace(/^\s*(system|assistant|developer|user|human|tool|function)\s*:/gim, '$1⁠:');
 }
 
 /**
