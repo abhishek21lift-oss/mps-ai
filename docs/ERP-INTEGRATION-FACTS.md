@@ -117,6 +117,14 @@ that lands, Phase 7 in this service is: register one tool, pass a non-null
 `knowledgeBase` to `createClientAgent`, and the classifier's `ragAvailable`
 branch — already written and already tested — starts routing to it.
 
+**That endpoint is now written.** It is in
+[`erp-patches/0001-ai-knowledge-search.patch`](./erp-patches/0001-ai-knowledge-search.patch)
+— 21 tests passing against the ERP source, but **not pushed**, because the
+session that wrote it could read `619-erp-backend` and not write to it. It
+guards with `requireStaff` rather than `admin`/`manager`, and returns
+`documents_available` alongside the chunks so an empty result can be told apart
+from an empty library. See [`erp-patches/README.md`](./erp-patches/README.md).
+
 ## 6. The ERP already has an AI layer
 
 This is the finding that most affects what should be built here.

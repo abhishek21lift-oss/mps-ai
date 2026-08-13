@@ -1,0 +1,457 @@
+From 4f5fa435783b4afd35bc1ecd3091933c24166ac4 Mon Sep 17 00:00:00 2001
+From: abhishek21lift-oss <abhishekkatiyar210399@gmail.com>
+Date: Thu, 13 Aug 2026 09:26:43 +0000
+Subject: [PATCH] Expose knowledge-base retrieval so first-party assistants can
+ use it
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+retrieveContext() has been reachable only from inside routes/ai.js, so the AI
+Coach was the only thing that could ever be grounded in a studio's own
+documents. The MY PT STUDIO AI service (repo: mps-ai) answers policy questions
+too, and with nothing to retrieve it can only say "I don't have your policy
+documents" — correct, and less useful than the answer already sitting in the
+library.
+
+GET /api/ai/knowledge/search?q=&topK= returns the studio's own chunks with the
+document each came from. No answer generation and no summarising: a retrieval
+endpoint that paraphrases is a second place for a policy to be quietly
+reworded.
+
+Guarded with requireStaff rather than requireRole('admin','manager'). Uploading,
+deleting and reindexing are custodial acts over a shared resource and stay
+restricted; reading what a policy says is what the policy is for, and the people
+asking "how long is the notice period?" mid-shift are trainers and reception.
+`member` is still excluded — these are internal SOPs.
+
+Scoping is the same resolution every other route uses. A platform-wide super
+admin gets an empty result rather than every tenant's documents: a similarity
+search across the whole platform is not a query anyone should be able to run,
+and retrieveContext() already fails closed the same way on a null org.
+
+The response carries documents_available alongside the chunks, which is the
+difference between "this studio has uploaded no policies" and "nothing in the
+policies covers that". An assistant told only that the result was empty will
+report the first as the second, which is how "we have no refund policy" gets
+said about a studio that has one.
+
+Query length is capped at 500 characters and topK is clamped to 10. The route
+sits inside requireAiQuota() and embedding cost scales with what is sent, so a
+pasted document must not be chargeable to the studio. Retrieval failures are
+logged and answered as an empty result rather than a 500, matching the AI
+Coach's own posture — a cold embedding model should not take the search box
+down.
+
+21 tests: tenant isolation across orgs and super-admin scoping, the role
+boundary, validation and cost control, both kinds of empty, and route ordering
+against a future GET /:id.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FAaG5CcyAiLJvYQCZ9Civb
+---
+ src/__tests__/aiKnowledge.search.test.js | 264 +++++++++++++++++++++++
+ src/routes/aiKnowledge.js                | 106 ++++++++-
+ 2 files changed, 368 insertions(+), 2 deletions(-)
+ create mode 100644 src/__tests__/aiKnowledge.search.test.js
+
+diff --git a/src/__tests__/aiKnowledge.search.test.js b/src/__tests__/aiKnowledge.search.test.js
+new file mode 100644
+index 0000000..8ef2a4b
+--- /dev/null
++++ b/src/__tests__/aiKnowledge.search.test.js
+@@ -0,0 +1,264 @@
++// Retrieval over a studio's own SOPs, guides and policies.
++//
++// The dangerous failures here are not 500s. They are:
++//   * one studio's policy text surfacing in another studio's search,
++//   * an empty result reported as "you have no such policy" when the studio has
++//     a library and the query simply missed,
++//   * a caller spending a studio's AI quota by pasting a novel into ?q=.
++// Each has a test below; none of them throws on the way.
++'use strict';
++
++jest.mock('../db/pool', () => ({ query: jest.fn() }));
++
++let mockUser = { id: 'u1', role: 'trainer', organization_id: 'org-1' };
++jest.mock('../middleware/auth', () => ({
++  auth: (req, _res, next) => { req.user = mockUser; next(); },
++  adminOnly: (_req, _res, next) => next(),
++  adminOrManager: (_req, _res, next) => next(),
++}));
++
++const mockRetrieve = jest.fn();
++jest.mock('../lib/ai/knowledgeBase', () => ({
++  ingestDocument: jest.fn(),
++  deleteDocument: jest.fn(),
++  retrieveContext: (...a) => mockRetrieve(...a),
++}));
++
++const request = require('supertest');
++const express = require('express');
++const pool = require('../db/pool');
++
++function app() {
++  const a = express();
++  a.use(express.json());
++  a.use('/api/ai/knowledge', require('../routes/aiKnowledge'));
++  a.use((err, _req, res, _next) => res.status(500).json({ error: err.message }));
++  return a;
++}
++
++const CHUNK = (over = {}) => ({
++  content: 'Sessions cancelled with less than 24 hours notice are charged in full.',
++  title: 'Cancellation Policy',
++  category: 'policy',
++  document_id: 'doc-1',
++  chunk_index: 0,
++  similarity: 0.81,
++  ...over,
++});
++
++/** The document-count query this route always runs first. */
++const mockDocCount = (n) => pool.query.mockResolvedValueOnce({ rows: [{ n }] });
++
++beforeEach(() => {
++  pool.query.mockReset();
++  mockRetrieve.mockReset();
++  mockRetrieve.mockResolvedValue([]);
++  mockUser = { id: 'u1', role: 'trainer', organization_id: 'org-1' };
++});
++
++describe('tenant isolation', () => {
++  test('retrieval is scoped to the caller\'s organization, never a supplied one', async () => {
++    mockDocCount(3);
++    mockRetrieve.mockResolvedValue([CHUNK()]);
++
++    await request(app())
++      .get('/api/ai/knowledge/search')
++      .query({ q: 'cancellation policy', organization_id: 'org-2', orgId: 'org-2' });
++
++    expect(mockRetrieve).toHaveBeenCalledWith(
++      expect.objectContaining({ organizationId: 'org-1' })
++    );
++    // The document count is scoped the same way, from the same resolution.
++    expect(pool.query.mock.calls[0][1]).toEqual(['org-1']);
++  });
++
++  test('a user in another org searches their own library, not the first one\'s', async () => {
++    mockUser = { id: 'u2', role: 'manager', organization_id: 'org-2' };
++    mockDocCount(0);
++
++    await request(app()).get('/api/ai/knowledge/search').query({ q: 'refunds' });
++
++    expect(mockRetrieve).toHaveBeenCalledWith(expect.objectContaining({ organizationId: 'org-2' }));
++  });
++
++  test('a platform-wide super admin gets nothing rather than everything', async () => {
++    // A similarity search across every tenant on the platform is not a query
++    // anyone should be able to run, and there is no single org to scope it to.
++    mockUser = { id: 'sa', role: 'super_admin', organization_id: null };
++
++    const res = await request(app()).get('/api/ai/knowledge/search').query({ q: 'refunds' });
++
++    expect(res.status).toBe(200);
++    expect(res.body.data).toMatchObject({ chunks: [], documents_available: 0, scope: 'platform' });
++    expect(mockRetrieve).not.toHaveBeenCalled();
++    expect(pool.query).not.toHaveBeenCalled();
++  });
++
++  test('a super admin targeting one org via x-org-id searches that org', async () => {
++    mockUser = { id: 'sa', role: 'super_admin', organization_id: null };
++    mockDocCount(2);
++
++    await request(app())
++      .get('/api/ai/knowledge/search')
++      .set('x-org-id', 'org-7')
++      .query({ q: 'refunds' });
++
++    expect(mockRetrieve).toHaveBeenCalledWith(expect.objectContaining({ organizationId: 'org-7' }));
++  });
++});
++
++describe('who may search', () => {
++  test.each(['admin', 'manager', 'trainer', 'reception', 'staff'])('%s may read the policies', async (role) => {
++    // Managing the library stays admin/manager. Reading what a policy says is
++    // what the policy is for, and the people asking mid-shift are trainers and
++    // reception.
++    mockUser = { id: 'u1', role, organization_id: 'org-1' };
++    mockDocCount(1);
++
++    const res = await request(app()).get('/api/ai/knowledge/search').query({ q: 'notice period' });
++
++    expect(res.status).toBe(200);
++  });
++
++  test('a client account may not', async () => {
++    mockUser = { id: 'm1', role: 'member', organization_id: 'org-1' };
++
++    const res = await request(app()).get('/api/ai/knowledge/search').query({ q: 'notice period' });
++
++    expect(res.status).toBe(403);
++    expect(mockRetrieve).not.toHaveBeenCalled();
++  });
++});
++
++describe('validation and cost control', () => {
++  test('a missing query is a 400, not an empty search', async () => {
++    const res = await request(app()).get('/api/ai/knowledge/search');
++
++    expect(res.status).toBe(400);
++    expect(res.body.error.code).toBe('VALIDATION');
++    expect(mockRetrieve).not.toHaveBeenCalled();
++  });
++
++  test('a whitespace-only query is a 400', async () => {
++    const res = await request(app()).get('/api/ai/knowledge/search').query({ q: '   ' });
++
++    expect(res.status).toBe(400);
++    expect(mockRetrieve).not.toHaveBeenCalled();
++  });
++
++  test('an oversized query is refused before anything is embedded', async () => {
++    // This route sits inside requireAiQuota(); embedding cost scales with what
++    // is sent, so a pasted document must not be chargeable to the studio.
++    const res = await request(app())
++      .get('/api/ai/knowledge/search')
++      .query({ q: 'x'.repeat(501) });
++
++    expect(res.status).toBe(400);
++    expect(mockRetrieve).not.toHaveBeenCalled();
++    expect(pool.query).not.toHaveBeenCalled();
++  });
++
++  test('topK is clamped rather than trusted', async () => {
++    mockDocCount(5);
++    await request(app()).get('/api/ai/knowledge/search').query({ q: 'refunds', topK: '9999' });
++    expect(mockRetrieve).toHaveBeenCalledWith(expect.objectContaining({ topK: 10 }));
++
++    mockRetrieve.mockClear();
++    pool.query.mockReset();
++    mockDocCount(5);
++    await request(app()).get('/api/ai/knowledge/search').query({ q: 'refunds', topK: '-3' });
++    expect(mockRetrieve).toHaveBeenCalledWith(expect.objectContaining({ topK: 1 }));
++  });
++
++  test('a non-numeric topK falls back to the configured default', async () => {
++    mockDocCount(5);
++    await request(app()).get('/api/ai/knowledge/search').query({ q: 'refunds', topK: 'all' });
++
++    expect(mockRetrieve).toHaveBeenCalledWith(expect.objectContaining({ topK: undefined }));
++  });
++});
++
++describe('the two kinds of empty, which must not be confused', () => {
++  test('no documents uploaded reports a count of zero', async () => {
++    mockDocCount(0);
++
++    const res = await request(app()).get('/api/ai/knowledge/search').query({ q: 'refunds' });
++
++    expect(res.body.data.chunks).toEqual([]);
++    expect(res.body.data.documents_available).toBe(0);
++  });
++
++  test('a library that exists but did not match says so', async () => {
++    // Same empty chunk list, different meaning. Without the count an assistant
++    // reports "this studio has no refund policy" about a studio that has one.
++    mockDocCount(12);
++
++    const res = await request(app()).get('/api/ai/knowledge/search').query({ q: 'parking' });
++
++    expect(res.body.data.chunks).toEqual([]);
++    expect(res.body.data.documents_available).toBe(12);
++  });
++});
++
++describe('results', () => {
++  test('chunks carry the document they came from, so an answer can cite it', async () => {
++    mockDocCount(4);
++    mockRetrieve.mockResolvedValue([CHUNK(), CHUNK({ chunk_index: 1, similarity: 0.66 })]);
++
++    const res = await request(app()).get('/api/ai/knowledge/search').query({ q: 'cancellation' });
++
++    expect(res.status).toBe(200);
++    expect(res.body.data.chunks).toHaveLength(2);
++    expect(res.body.data.chunks[0]).toMatchObject({
++      title: 'Cancellation Policy',
++      category: 'policy',
++      document_id: 'doc-1',
++      chunk_index: 0,
++      similarity: 0.81,
++    });
++    expect(res.body.data.chunks[0].content).toContain('24 hours notice');
++  });
++
++  test('the endpoint returns text, never an answer', async () => {
++    // A retrieval endpoint that paraphrases is a second place for a policy to
++    // be quietly reworded.
++    mockDocCount(1);
++    mockRetrieve.mockResolvedValue([CHUNK()]);
++
++    const res = await request(app()).get('/api/ai/knowledge/search').query({ q: 'cancellation' });
++
++    expect(res.body.data).not.toHaveProperty('answer');
++    expect(res.body.data).not.toHaveProperty('summary');
++    expect(res.body.data.chunks[0].content).toBe(CHUNK().content);
++  });
++
++  test('a retrieval failure is not a 500 — it is an honest empty result', async () => {
++    // Mirrors the AI Coach's own call site: a cold embedding model must not
++    // take the search box down.
++    mockDocCount(3);
++    mockRetrieve.mockRejectedValue(new Error('embedding model cold'));
++
++    const res = await request(app()).get('/api/ai/knowledge/search').query({ q: 'refunds' });
++
++    expect(res.status).toBe(200);
++    expect(res.body.data.chunks).toEqual([]);
++    // And the caller can still tell the difference — the library is not empty.
++    expect(res.body.data.documents_available).toBe(3);
++  });
++});
++
++describe('route ordering', () => {
++  test('"search" is not swallowed by a :id route', async () => {
++    // DELETE and POST /:id exist today, so there is no collision yet. This is
++    // about the GET /:id somebody adds next year.
++    const src = require('fs').readFileSync(
++      require('path').join(__dirname, '..', 'routes', 'aiKnowledge.js'), 'utf8'
++    );
++    const search = src.indexOf("router.get('/search'");
++    const firstIdRoute = src.search(/router\.(get|delete|post|patch)\('\/:id/);
++
++    expect(search).toBeGreaterThan(-1);
++    expect(firstIdRoute).toBeGreaterThan(-1);
++    expect(search).toBeLessThan(firstIdRoute);
++  });
++});
+diff --git a/src/routes/aiKnowledge.js b/src/routes/aiKnowledge.js
+index 1db3996..4128ed9 100644
+--- a/src/routes/aiKnowledge.js
++++ b/src/routes/aiKnowledge.js
+@@ -8,11 +8,11 @@ const multer = require('multer');
+ const { randomUUID } = require('crypto');
+ const pool = require('../db/pool');
+ const { auth } = require('../middleware/auth');
+-const { requireRole } = require('../middleware/rbac');
++const { requireRole, requireStaff } = require('../middleware/rbac');
+ const { tenantScope, orgIdOf } = require('../lib/tenant-db');
+ const { saveFile } = require('../lib/fileStorage');
+ const { SUPPORTED_MIME_TYPES } = require('../lib/ai/textExtract');
+-const { ingestDocument, deleteDocument } = require('../lib/ai/knowledgeBase');
++const { ingestDocument, deleteDocument, retrieveContext } = require('../lib/ai/knowledgeBase');
+ const logger = require('../lib/logger');
+ 
+ const router = express.Router();
+@@ -104,6 +104,108 @@ router.get('/', auth, requireRole('admin', 'manager'), async (req, res) => {
+   res.json({ data: rows });
+ });
+ 
++/* ═══════════════════════════════════════════════════════════════════════════
++   GET /api/ai/knowledge/search?q=&topK= — retrieval for first-party assistants
++
++   Until now retrieveContext() was reachable only from inside routes/ai.js, so
++   the AI Coach was the only thing that could ever be grounded in a studio's own
++   documents. The MY PT STUDIO AI service (repo: mps-ai) answers policy
++   questions too, and with nothing to retrieve it can only say "I don't have
++   your policy documents" — correct, and less useful than the answer that is
++   sitting in the library already.
++
++   Declared BEFORE the /:id routes below so a document can never be named
++   "search". Those are DELETE and POST today, so there is no collision yet;
++   this is about the GET /:id somebody adds next year.
++
++   ── Why requireStaff, when managing the library is admin/manager ────────────
++
++   Uploading, deleting and reindexing are custodial acts over a shared
++   resource, and they stay restricted. READING what a policy says is what the
++   policy is for. The people who need "how long is the notice period?" mid-shift
++   are trainers and reception, and gating retrieval to admin/manager would leave
++   the knowledge base useful only to the two roles least likely to be asking.
++
++   `member` is still excluded — these are internal SOPs, guides and policies,
++   and requireStaff is the same allow-list guarding /api/pt-os.
++
++   ── What it deliberately does NOT do ────────────────────────────────────────
++
++   No answer generation, no summarising, no ranking beyond similarity. It
++   returns the studio's own text and the document it came from, and leaves the
++   interpreting to the caller. A retrieval endpoint that paraphrases is a second
++   place for a policy to be quietly reworded.
++   ═══════════════════════════════════════════════════════════════════════════ */
++const MAX_QUERY_CHARS = 500;
++const MAX_TOP_K = 10;
++
++router.get('/search', auth, requireStaff, async (req, res) => {
++  const scope = tenantScope(req);
++  // Retrieval is per-studio by definition — the chunks table is partitioned by
++  // organization_id and a similarity search across every tenant on the platform
++  // is not a thing anyone should be able to run. A platform-wide super admin
++  // has no single org to search, so this is empty rather than everything.
++  // Mirrors GET / above, and retrieveContext() itself fails closed the same way
++  // on a null organizationId.
++  if (!scope.applyFilter) {
++    return res.json({ data: { chunks: [], documents_available: 0, scope: 'platform' } });
++  }
++
++  const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
++  if (!q) {
++    return res.status(400).json({ error: { code: 'VALIDATION', message: 'q is required' } });
++  }
++  if (q.length > MAX_QUERY_CHARS) {
++    // Embedding cost scales with what is sent, and this endpoint sits inside
++    // requireAiQuota() — a caller must not be able to spend a studio's quota by
++    // pasting a document into the query string.
++    return res.status(400).json({
++      error: { code: 'VALIDATION', message: `q must be ${MAX_QUERY_CHARS} characters or fewer` },
++    });
++  }
++
++  const requestedTopK = parseInt(req.query.topK, 10);
++  const topK = Number.isFinite(requestedTopK)
++    ? Math.min(Math.max(requestedTopK, 1), MAX_TOP_K)
++    : undefined;   // undefined → retrieveContext's own AI_RAG_TOP_K default
++
++  // Counted separately, and worth the extra query: it is the difference between
++  // "this studio has not uploaded any policies" and "nothing in the policies
++  // covers that". An assistant told only that the result was empty will happily
++  // report the first as the second, which is how "we have no refund policy"
++  // gets said about a studio that has one.
++  const { rows: countRows } = await pool.query(
++    `SELECT COUNT(*)::int AS n FROM ai_documents WHERE organization_id = $1 AND status = 'ready'`,
++    [scope.orgId]
++  );
++  const documentsAvailable = countRows[0]?.n ?? 0;
++
++  let chunks = [];
++  try {
++    chunks = await retrieveContext({ organizationId: scope.orgId, query: q, topK });
++  } catch (err) {
++    // Same posture as the AI Coach's own call site: a cold embedding model is
++    // not a reason to 500 a search box. Empty results with the document count
++    // attached still let the caller say something true.
++    logger.warn({ err: err.message }, 'ai_knowledge_search_failed');
++  }
++
++  res.json({
++    data: {
++      chunks: chunks.map((c) => ({
++        content: c.content,
++        title: c.title,
++        category: c.category,
++        document_id: c.document_id,
++        chunk_index: c.chunk_index,
++        similarity: Number(c.similarity),
++      })),
++      documents_available: documentsAvailable,
++      scope: 'organization',
++    },
++  });
++});
++
+ /* ═══════════════════════════════════════════════════════════════════════════
+    DELETE /api/ai/knowledge/:id
+    ═══════════════════════════════════════════════════════════════════════════ */
+-- 
+2.43.0
+
