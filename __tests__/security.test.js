@@ -167,10 +167,17 @@ describe('§51.12 / §17 — identity cannot be forged here', () => {
 describe('§51.5/6 / §30 / §31 — the tool surface is closed', () => {
   const { list, run, get } = require('../src/platform/tools/registry');
 
-  test('every registered tool is a client read — no SQL, shell or generic fetch', () => {
+  test('every registered tool is a named read — no SQL, shell or generic fetch', () => {
+    const { isStudioDocumentTool } = require('./helpers');
     const names = list().map((t) => t.name);
     expect(names.length).toBeGreaterThan(0);
-    for (const n of names) expect(n).toMatch(/^getClient/);
+    // Client reads, plus the one enumerated studio document read. The closed
+    // surface is the property under test here and it is unchanged: a tool is
+    // still a named function over one known ERP endpoint, and the forbidden
+    // shapes below remain absent regardless of which kind it is.
+    for (const n of names) {
+      if (!isStudioDocumentTool(n)) expect(n).toMatch(/^getClient/);
+    }
     for (const forbidden of ['executeSQL', 'runQuery', 'query', 'fetch', 'exec', 'runCommand']) {
       expect(get(forbidden)).toBeNull();
     }

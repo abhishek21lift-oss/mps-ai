@@ -166,13 +166,19 @@ describe('end to end', () => {
     expect(res.body.toolsUnavailable.map((t) => t.tool)).toContain('getClientTrainingAnalytics');
   });
 
-  test('the tools stay read-only and single-client', () => {
+  test('the training tools stay read-only and single-client', () => {
     const { list } = require('../src/platform/tools/registry');
+    const { isStudioDocumentTool } = require('./helpers');
     const names = list().map((t) => t.name);
 
     expect(names).toContain('getClientTrainingAnalytics');
     expect(names).toContain('getClientVolumeSummary');
-    for (const n of names) expect(n).toMatch(/^getClient/);
+    // Every tool that reads a person's records is anchored to one client. The
+    // enumerated studio document read (helpers.js) reads no client's records
+    // and is excluded by name, not by pattern.
+    for (const n of names) {
+      if (!isStudioDocumentTool(n)) expect(n).toMatch(/^getClient/);
+    }
   });
 });
 

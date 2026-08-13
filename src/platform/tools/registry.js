@@ -183,6 +183,41 @@ define({
   endpoint: ({ clientId, groupBy }) => `/api/pt-os/workout-log/volume-summary${qs({ client_id: clientId, group_by: groupBy })}`,
 });
 
+/* ── Studio knowledge ────────────────────────────────────────────────────────
+   The one tool here that is NOT about a single client.
+
+   Every other tool takes a clientId and answers from that client's records.
+   This one takes a QUERY and answers from the studio's uploaded policies, SOPs
+   and contracts — documents that belong to the studio rather than to anybody in
+   it. That difference is why the agent runs it on its own line rather than
+   through planTools(), which builds `{ clientId }` arguments for everything it
+   returns.
+
+   Tenancy is unchanged and still the ERP's: /api/ai/knowledge/search resolves
+   the organisation from the forwarded user token, returns only that studio's
+   chunks, and answers a platform-wide super admin with an empty result rather
+   than every tenant's documents. It is guarded by requireStaff, so a client
+   portal login cannot reach it — internal SOPs are not member-readable.
+
+   Nothing here widens what this service may see. It reads what the trainer
+   asking the question could already open in Settings → AI Knowledge. */
+define({
+  name: 'searchStudioKnowledge',
+  summary: 'The studio\'s own uploaded policies, SOPs, guides and contracts: the passages most similar to a question, each with the document it came from. Use it to say what the studio\'s written policy actually says, and quote it rather than paraphrasing.',
+  label: 'studio policy documents',
+  args: z.object({
+    // 500 mirrors the ERP's own MAX_QUERY_CHARS. The caller truncates rather
+    // than relying on this to reject: a trainer who types a long question
+    // should get a retrieval against the first 500 characters, not a BAD_ARGS
+    // that silently costs them the policy half of their answer.
+    q: z.string().trim().min(1).max(500),
+    // The ERP clamps to 10 and defaults on undefined. Bounded here too so an
+    // out-of-range value is a local BAD_ARGS rather than a silent clamp.
+    topK: z.coerce.number().int().min(1).max(10).optional(),
+  }),
+  endpoint: ({ q, topK }) => `/api/ai/knowledge/search${qs({ q, topK })}`,
+});
+
 function get(name) {
   return TOOLS.get(name) || null;
 }
