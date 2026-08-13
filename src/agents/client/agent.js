@@ -374,11 +374,15 @@ function createClientAgent({
    * That split is the whole reason prepare() exists: a denial must still be a
    * 404, not a 200 whose body happens to contain the word "denied".
    *
-   * Events yielded:
-   *   { type: 'start', clientName, toolsUsed, toolsUnavailable, classification }
-   *   { type: 'delta', text }        zero or more
-   *   { type: 'done',  meta, ... }   exactly once on success
-   *   { type: 'error', code, message } instead of 'done', on failure
+   * Events yielded — names and field names are the CONSUMER's contract
+   * (`619-erp-frontend`, `src/lib/client-ai.ts`), not this service's preference:
+   *
+   *   { type: 'start', clientId, clientName, toolsUsed, toolsUnavailable }
+   *   { type: 'chunk', content }        zero or more
+   *   { type: 'done',  message, … }     exactly once on success — the WHOLE
+   *                                     answer, so a client that missed a chunk
+   *                                     still ends with the complete text
+   *   { type: 'error', code, message, partial }   instead of 'done', on failure
    */
   async function askStream({ clientId, message, history = [], userToken, requestId }) {
     const started = Date.now();
@@ -402,7 +406,6 @@ function createClientAgent({
         clientName,
         toolsUsed,
         toolsUnavailable,
-        classification: classification.intent,
       };
 
       let text = '';
@@ -414,7 +417,7 @@ function createClientAgent({
         for await (const ev of router.chatStream({ intent, messages })) {
           if (ev.type === 'delta') {
             text += ev.text;
-            yield { type: 'delta', text: ev.text };
+            yield { type: 'chunk', content: ev.text };
           } else if (ev.type === 'done') {
             model = ev.model;
             usedFallback = ev.used_fallback;
@@ -477,8 +480,16 @@ function createClientAgent({
         latencyMs: elapsed,
       });
 
+      // The full answer, not just the tail. A client that dropped a chunk — or
+      // one that never accumulated them, like a server-to-server caller reading
+      // only the last frame — still ends holding the complete text.
       yield {
         type: 'done',
+        message: text,
+        clientId,
+        clientName,
+        toolsUsed,
+        toolsUnavailable,
         proposedAction: null,
         requiresConfirmation: false,
         meta: {

@@ -19,6 +19,7 @@ fabrication the grounding rules exist to prevent.
 | "No trainer-level client restriction exists anywhere in the ERP" | **Too broad.** Lists and dues *are* trainer-scoped. **By-id client reads are not** — which is the set this service uses, so the conclusion held even though the reason was overstated. See SECURITY.md §7. |
 | "No existing RAG implementation" | **Wrong.** A full knowledge base exists — see §5. |
 | "No existing agent/tool architecture to reuse" | **Wrong.** The ERP has its own AI layer with tenant-scoped, role-gated tools — see §6. |
+| "Frontend integration — no Ask AI entry yet" | **Wrong.** `619-erp-frontend` already ships `src/lib/client-ai.ts`, a tested SSE consumer, and a `next.config.js` rewrite for `AI_SERVICE_URL`. See §8. |
 
 ## 2. Tenancy — confirmed
 
@@ -187,3 +188,57 @@ decision to route through them.
   an endpoint that already applies it — do not add a second opinion.
 - Money is INR; the ERP formats with `en-IN`. The studio timezone default
   (`Asia/Kolkata`) matches.
+
+
+## 8. The frontend, and the contract it was already written against
+
+Verified against `abhishek21lift-oss/619-erp-frontend` @ `20a7a8a`.
+
+**The integration exists.** `src/lib/client-ai.ts` calls
+`POST /ai/client-agent/chat/stream`, `src/__tests__/client-ai-stream.test.ts`
+tests it, and `next.config.js` rewrites `/ai/*` to `AI_SERVICE_URL` — optional,
+so a deploy without the AI service 404s that path instead of failing to build.
+
+That means the frontend was written against a **specification** of this service,
+and the first streaming implementation here did not match it. Four mismatches,
+all now fixed on this side, because the consumer is the one already written and
+tested:
+
+| The frontend reads | This service originally sent |
+|---|---|
+| `type` **inside** the JSON payload | only an SSE `event:` line — every frame hit the client's `default: break` |
+| `{ type: 'chunk', content }` | `{ type: 'delta', text }` |
+| `done` carrying the **whole** answer incl. `message` | `done` carrying only `meta` and the confirm fields |
+| the httpOnly `token` **cookie** | `Authorization: Bearer` only — so every request from the real product was a 401 |
+
+The auth one is the important one and it is not a detail. The cookie is
+`sameSite:'strict'`, which is exactly why `/ai/*` is a same-origin rewrite: a
+cross-origin call would arrive with no cookie at all. A service that only reads
+`Authorization` works perfectly against curl and fails completely against the
+product.
+
+It also broke rate limiting invisibly. The limiter keyed on
+`req.headers.authorization`; with cookie auth that is absent, so every request
+fell through to `req.ip` — and behind the rewrite that IP is the **frontend
+container**, putting an entire studio in one bucket. Keying is now derived from
+the token wherever it came from (`src/lib/requestToken.js`).
+
+### Still unimplemented here: `grounding`
+
+`ClientAiAnswer` declares an optional `grounding` field:
+
+```ts
+{ checked, inSource, derived, unverified,
+  figures: { text, value, line, context }[] }
+```
+
+described as *"the service's check of the answer's figures against the records
+they were supposed to come from. Numbers only — prose is not checkable this
+way."*
+
+This service does not produce it. The field is optional, so nothing breaks, and
+the panel simply has nothing to show. It is a real anti-hallucination feature —
+extract the numerals from the answer, match them against the retrieved payloads,
+and report the ones that cannot be accounted for — and it deserves its own
+design rather than being bolted on. **Recorded here so it is not mistaken for
+something already working.**

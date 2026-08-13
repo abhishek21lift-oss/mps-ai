@@ -15,6 +15,7 @@ const { createClientAgentRouter } = require('./api/clientAgent');
 const { list: listTools } = require('./platform/tools/registry');
 const { createStudioClock } = require('./platform/time/studioClock');
 const { createAudit } = require('./platform/audit/log');
+const { rateLimitKey } = require('./lib/requestToken');
 const logger = require('./lib/logger');
 
 function buildApp({ config, erp, provider, clock, audit }) {
@@ -25,9 +26,16 @@ function buildApp({ config, erp, provider, clock, audit }) {
   app.use(helmet());
   app.use(express.json({ limit: '128kb' }));
 
-  // §47 — an explicit allow-list. `credentials` stays off: the browser sends
-  // the token in an Authorization header it sets itself, so this service never
-  // needs cookies, and not accepting them removes CSRF from the threat model.
+  // §47 — an explicit allow-list.
+  //
+  // `credentials` stays off, and that is still right even though the browser
+  // now authenticates with a cookie. It never makes a cross-origin call here:
+  // the frontend rewrites /ai/* to this service same-origin (next.config.js),
+  // precisely because the `token` cookie is httpOnly and sameSite:'strict' and
+  // would not survive a cross-site request. So the browser's cookie arrives via
+  // that server-side hop, no CORS is involved in the path that matters, and
+  // refusing credentialed cross-origin requests keeps CSRF out of the threat
+  // model rather than inviting it back in.
   app.use(cors({
     origin(origin, cb) {
       if (!origin) return cb(null, true);              // server-to-server, curl
@@ -72,18 +80,21 @@ function buildApp({ config, erp, provider, clock, audit }) {
     message: rateLimited,
   });
 
-  // §45 — keyed by token rather than IP so one studio behind one NAT is not
-  // rate-limited as a single user. The token is hashed into the key by
-  // express-rate-limit's store, never logged.
+  // §45 — keyed by the caller's TOKEN rather than their IP, so one studio
+  // behind one NAT is not rate-limited as a single user.
+  //
+  // Derived through requestToken.rateLimitKey rather than read off the
+  // Authorization header directly. That distinction is not tidiness: the
+  // browser authenticates with an httpOnly cookie through the frontend's
+  // same-origin rewrite, so reading only the header made every real request
+  // fall through to req.ip — and that IP is the frontend container. One bucket
+  // for the whole studio, and nobody would have noticed until a busy morning.
   const limiter = rateLimit({
     windowMs: config.RATE_LIMIT_WINDOW_MS,
     max: config.RATE_LIMIT_MAX,
     standardHeaders: true,
     legacyHeaders: false,
-    keyGenerator: (req) => {
-      const h = req.headers.authorization;
-      return typeof h === 'string' && h.length > 16 ? h.slice(-32) : req.ip;
-    },
+    keyGenerator: rateLimitKey,
     message: rateLimited,
   });
 

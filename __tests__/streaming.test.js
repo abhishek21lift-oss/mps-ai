@@ -23,7 +23,7 @@ const streamApp = (over = {}) => appWith({
 });
 
 describe('a normal streamed answer', () => {
-  test('emits start, deltas in order, then done', async () => {
+  test('emits start, chunks in order, then done', async () => {
     const { app } = streamApp();
 
     const res = await postStream(app, { clientId: 'c-1', message: 'Summarize this client' });
@@ -35,7 +35,7 @@ describe('a normal streamed answer', () => {
     expect(events[0].event).toBe('start');
     expect(events.at(-1).event).toBe('done');
 
-    const deltas = events.filter((e) => e.event === 'delta').map((e) => e.data.text);
+    const deltas = events.filter((e) => e.event === 'chunk').map((e) => e.data.content);
     expect(deltas.join('')).toBe('Hello there.');
   });
 
@@ -48,8 +48,38 @@ describe('a normal streamed answer', () => {
     const start = parseSse(res.text)[0];
 
     expect(start.data.clientName).toBe('Rahul Sharma');
+    expect(start.data.clientId).toBe('c-1');
     expect(start.data.toolsUsed).toContain('getClientProfile');
-    expect(start.data.classification).toBe('DATABASE_QUERY');
+    expect(start.data.toolsUnavailable).toEqual([]);
+  });
+
+  test('every frame carries its type INSIDE the payload', () => {
+    // The consumer (619-erp-frontend, src/lib/client-ai.ts) scans for `data:`
+    // lines and switches on `evt.type`. It never reads the SSE `event:` line.
+    // Emitting the name only as `event:` — as an earlier revision of this
+    // service did — meant every frame hit the client's `default: break` and a
+    // perfectly good answer arrived as STREAM_INCOMPLETE.
+    const { app } = streamApp();
+
+    return postStream(app, { clientId: 'c-1', message: 'Summarize this client' })
+      .then((res) => {
+        for (const e of parseSse(res.text)) {
+          expect(e.data.type).toBe(e.event);
+        }
+      });
+  });
+
+  test('done carries the whole answer, not just the tail', async () => {
+    // A client that dropped a chunk, or one that reads only the last frame,
+    // still ends holding the complete text.
+    const { app } = streamApp();
+
+    const res = await postStream(app, { clientId: 'c-1', message: 'Summarize this client' });
+    const done = parseSse(res.text).at(-1);
+
+    expect(done.data.message).toBe('Hello there.');
+    expect(done.data.clientName).toBe('Rahul Sharma');
+    expect(done.data.toolsUsed).toContain('getClientProfile');
   });
 
   test('done carries the same meta the non-streaming route returns', async () => {
@@ -166,7 +196,7 @@ describe('a model that dies mid-answer', () => {
     });
 
     const res = await postStream(app, { clientId: 'c-1', message: 'summary' });
-    const deltas = parseSse(res.text).filter((e) => e.event === 'delta').map((e) => e.data.text);
+    const deltas = parseSse(res.text).filter((e) => e.event === 'chunk').map((e) => e.data.content);
 
     expect(deltas.join('')).toBe('The balance is ');
   });
@@ -193,7 +223,7 @@ describe('fallback before the first token', () => {
     const res = await postStream(app, { clientId: 'c-1', message: 'summary' });
     const events = parseSse(res.text);
 
-    expect(events.filter((e) => e.event === 'delta').map((e) => e.data.text).join('')).toBe('Recovered.');
+    expect(events.filter((e) => e.event === 'chunk').map((e) => e.data.content).join('')).toBe('Recovered.');
     expect(events.at(-1).data.meta.used_fallback).toBe(true);
   });
 
@@ -218,15 +248,15 @@ describe('fallback before the first token', () => {
 });
 
 describe('short-circuits stream too, so the client has one code path', () => {
-  test('a studio-wide question arrives as start/delta/done with no model call', async () => {
+  test('a studio-wide question arrives as start/chunk/done with no model call', async () => {
     const { app, provider } = streamApp();
 
     const res = await postStream(app, { clientId: 'c-1', message: 'Show me all clients in the studio' });
     const events = parseSse(res.text);
 
     expect(res.status).toBe(200);
-    expect(events.map((e) => e.event)).toEqual(['start', 'delta', 'done']);
-    expect(events[1].data.text).toMatch(/one client at a time/i);
+    expect(events.map((e) => e.event)).toEqual(['start', 'chunk', 'done']);
+    expect(events[1].data.content).toMatch(/one client at a time/i);
     expect(provider.seen).toHaveLength(0);
     expect(events.at(-1).data.meta.tokens).toEqual({ prompt: 0, completion: 0 });
   });
@@ -237,7 +267,7 @@ describe('short-circuits stream too, so the client has one code path', () => {
     const res = await postStream(app, { clientId: 'c-1', message: "What's our cancellation policy?" });
     const events = parseSse(res.text);
 
-    expect(events[1].data.text).toMatch(/don't have your studio's policy documents/i);
+    expect(events[1].data.content).toMatch(/don't have your studio's policy documents/i);
   });
 });
 
@@ -308,7 +338,102 @@ describe('SSE framing', () => {
     const res = await postStream(app, { clientId: 'c-1', message: 'summary' });
     const events = parseSse(res.text);
 
-    expect(events.map((e) => e.event)).toEqual(['start', 'delta', 'done']);
-    expect(events[1].data.text).toBe('line one\nline two\n\nline three');
+    expect(events.map((e) => e.event)).toEqual(['start', 'chunk', 'done']);
+    expect(events[1].data.content).toBe('line one\nline two\n\nline three');
+  });
+});
+
+describe('cookie authentication — how the browser actually arrives', () => {
+  const { tokenFrom, rateLimitKey } = require('../src/lib/requestToken');
+
+  test('the token cookie is accepted, because the browser cannot send a header', async () => {
+    // The frontend's `token` cookie is httpOnly and sameSite:'strict'. JS
+    // cannot read it to build an Authorization header, so /ai/* is a
+    // same-origin rewrite and what reaches this service is a Cookie header.
+    // Supporting only Bearer made every request from the real product a 401.
+    const { app, erp } = streamApp();
+
+    const res = await request(app).post('/ai/client-agent/chat/stream')
+      .set('Cookie', 'token=cookie-jwt-value')
+      .send({ clientId: 'c-1', message: 'Summarize this client' });
+
+    expect(res.status).toBe(200);
+    expect(erp.calls.length).toBeGreaterThan(0);
+    for (const c of erp.calls) expect(c.userToken).toBe('cookie-jwt-value');
+  });
+
+  test('the non-streaming route accepts it too', async () => {
+    const { app, erp } = streamApp();
+
+    const res = await request(app).post('/ai/client-agent/chat')
+      .set('Cookie', 'token=cookie-jwt-value')
+      .send({ clientId: 'c-1', message: 'summary' });
+
+    expect(res.status).toBe(200);
+    for (const c of erp.calls) expect(c.userToken).toBe('cookie-jwt-value');
+  });
+
+  test('an explicit Authorization header wins over a cookie', () => {
+    expect(tokenFrom({
+      headers: { authorization: 'Bearer from-header', cookie: 'token=from-cookie' },
+    })).toBe('from-header');
+  });
+
+  test('other cookies are not mistaken for the token', () => {
+    expect(tokenFrom({ headers: { cookie: 'session=a; theme=dark' } })).toBeNull();
+    expect(tokenFrom({ headers: { cookie: 'refresh_token=nope; token=yes' } })).toBe('yes');
+    expect(tokenFrom({ headers: {} })).toBeNull();
+  });
+
+  test('a value containing "=" survives, and percent-encoding is decoded', () => {
+    // JWTs are base64url so they carry no "=", but a padded one would, and a
+    // split-on-every-= parser would silently truncate the signature.
+    expect(tokenFrom({ headers: { cookie: 'token=a.b.c==' } })).toBe('a.b.c==');
+    expect(tokenFrom({ headers: { cookie: 'token=a%20b' } })).toBe('a b');
+  });
+
+  test('the rate limiter keys on the cookie token, not the proxy IP', async () => {
+    // The browser reaches this service through the frontend's rewrite, so
+    // req.ip is the frontend container for EVERY user. Keying on the header
+    // alone put the whole studio in one bucket.
+    const a = rateLimitKey({ headers: { cookie: `token=${'a'.repeat(40)}` }, ip: '10.0.0.1' });
+    const b = rateLimitKey({ headers: { cookie: `token=${'b'.repeat(40)}` }, ip: '10.0.0.1' });
+
+    expect(a).not.toBe(b);
+    expect(a).not.toBe('10.0.0.1');
+  });
+
+  test('two cookie users are limited separately', async () => {
+    const config = configWith({ RATE_LIMIT_MAX: '2', RATE_LIMIT_IP_MAX: '100' });
+    const { app } = appWith({
+      erp: okErp(), provider: fakeStreamProvider(), clock: fixedClock(), config,
+    });
+
+    const hit = (tok) => request(app).post('/ai/client-agent/chat')
+      .set('Cookie', `token=${tok}`)
+      .send({ clientId: 'c-1', message: 'summary' });
+
+    const alice = `alice${'x'.repeat(40)}`;
+    const bob = `bob${'y'.repeat(40)}`;
+
+    await hit(alice); await hit(alice);
+    expect((await hit(alice)).status).toBe(429);   // alice is over her limit
+    expect((await hit(bob)).status).toBe(200);     // bob is unaffected
+  });
+});
+
+describe('keep-alive', () => {
+  test('comment frames are emitted and are not events', async () => {
+    // Proxies close a connection silent for ~60s, and a cold free-tier model
+    // can take longer than that to say its first word. A `: ping` frame is not
+    // a `data:` line, so the consumer skips it without needing to know.
+    const { app } = streamApp();
+    const res = await postStream(app, { clientId: 'c-1', message: 'summary' });
+
+    // No ping in this fast test, but the parser must tolerate one regardless.
+    const withPing = `: ping\n\n${res.text}`;
+    const events = parseSse(withPing).filter((e) => e.event);
+    expect(events[0].event).toBe('start');
+    expect(events.at(-1).event).toBe('done');
   });
 });

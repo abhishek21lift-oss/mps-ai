@@ -15,13 +15,20 @@ questions about one authorised client, grounded in ERP data.
 
 ## How a request flows
 
+The browser never calls this service cross-origin. The frontend rewrites
+`/ai/*` to it same-origin (`next.config.js`), because the `token` cookie is
+httpOnly and `sameSite:'strict'` and would not survive a cross-site request. So
+what arrives here is a **Cookie**, not an `Authorization` header — and both are
+accepted (`src/lib/requestToken.js`), then forwarded to the ERP as a Bearer,
+which the ERP also accepts either way.
+
 ```
-Browser ──(user JWT)──▶ mps-ai ──(user JWT + service secret)──▶ ERP ──▶ Postgres
-                           │                                    │
-                           │                          auth() resolves user,
-                    cannot decode authz               organisation and role
-                    from the token: there             from the DB, then
-                    is nothing in it                  tenantScope() filters
+Browser ──(token cookie)──▶ frontend rewrite ──▶ mps-ai ──(Bearer + secret)──▶ ERP ──▶ Postgres
+                                                    │                          │
+                                          cannot decode authz        auth() resolves user,
+                                          from the token: there      organisation and role
+                                          is nothing in it           from the DB, then
+                                                                     tenantScope() filters
 ```
 
 The ERP's JWT payload is `{ id, token_version }` and nothing more — role,
@@ -151,7 +158,7 @@ studio.
 ### `POST /ai/client-agent/chat`
 
 ```jsonc
-// Request — Authorization: Bearer <the user's ERP JWT>
+// Request — auth: `Authorization: Bearer <ERP JWT>` OR the httpOnly `token` cookie
 { "clientId": "…", "message": "How is this client progressing?",
   "history": [{ "role": "user", "content": "…" }] }
 ```
@@ -188,17 +195,30 @@ route above is unchanged.
 
 ```
 event: start
-data: {"clientId":"…","clientName":"Rahul Sharma",
+data: {"type":"start","clientId":"…","clientName":"Rahul Sharma",
        "toolsUsed":["getClientProfile","getClientSummary"],
-       "toolsUnavailable":[],"classification":"DATABASE_QUERY"}
+       "toolsUnavailable":[],"requestId":"…"}
 
-event: delta
-data: {"text":"His package expires on "}
+event: chunk
+data: {"type":"chunk","content":"His package expires on "}
 
 event: done
-data: {"proposedAction":null,"requiresConfirmation":false,
+data: {"type":"done","message":"<the whole answer>","clientId":"…",
+       "clientName":"Rahul Sharma","toolsUsed":[…],"toolsUnavailable":[],
+       "proposedAction":null,"requiresConfirmation":false,
        "meta":{…},"requestId":"…"}
 ```
+
+**The event name is inside the payload as `type`.** The consumer
+(`619-erp-frontend`, `src/lib/client-ai.ts`) scans for `data:` lines and switches
+on `evt.type`; it never reads the SSE `event:` line. Both are emitted, but `type`
+is the one that must never be dropped. `: ping` comment frames are sent every
+15s and are skipped by the same rule — proxies close a connection silent for
+about sixty seconds, and a cold free-tier model can take longer than that to
+produce its first word.
+
+**`done` carries the whole answer**, not just a terminator, so a client that
+dropped a chunk still ends holding the complete text.
 
 **Provenance arrives first, not last.** The tools have already run by the time
 the stream opens, so a UI can show what the answer rests on while the answer is
@@ -339,7 +359,6 @@ conversation history is supplied by the caller each turn rather than stored here
 
 Honest list; none of it is stubbed to look finished.
 
-- **Frontend integration.** No "Ask AI" entry on the client profile yet.
 - **Write actions** and the confirm-before-execute flow.
 - **Feedback** (👍/👎) and the evaluation harness.
 

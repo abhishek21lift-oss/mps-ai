@@ -126,13 +126,24 @@ One line, matching the `/api/pt-os` precedent exactly: `auth, requireStaff` on
 the mount. A client's own progress is served by `/api/me`, which scopes to the
 caller.
 
-### Before merging
+### Before merging — ✅ checked, and clear
 
-**Confirm no client-facing frontend screen calls `/api/progress` directly.**
-This session could read the backend but not the frontend, so that check could
-not be done here. `client-portal.routes.js` does not proxy these routes, which
-is a good sign but not proof. If a client screen does use them, the fix is to
-serve it from `/api/me` rather than to loosen this gate.
+The open question was whether a client-facing screen calls `/api/progress`
+directly, in which case gating it would break the portal. **It does not.**
+Verified against `abhishek21lift-oss/619-erp-frontend` @ `20a7a8a`:
+
+- Every call goes through one module, `src/lib/api/endpoints/progress.ts`.
+- Its consumers are all staff surfaces — `app/(chrome)/pt-os/**`,
+  `app/(chrome)/ai/**`, `components/pt-os/**`, `components/profile/**` — plus
+  the `src/lib/api/index.ts` barrel.
+- The client portal is `app/(bare)/member/**`. Grepping that tree, and
+  `(bare)/client` and `(bare)/member-login`, for `api/progress`, `progressApi`
+  or `endpoints/progress` returns **nothing**.
+- `app/(bare)/member/dashboard/page.tsx` calls exactly one endpoint: `/api/me`.
+
+So `requireStaff` on this mount breaks no client-facing screen, which is what
+you would expect — `/api/me` is where a client's own progress already comes
+from. **This patch is ready to merge.**
 
 ### Worth considering separately
 

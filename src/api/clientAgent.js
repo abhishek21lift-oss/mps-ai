@@ -26,11 +26,7 @@ const Body = z.object({
   })).max(40).optional(),
 });
 
-function bearerFrom(req) {
-  const h = req.headers.authorization;
-  if (typeof h === 'string' && h.startsWith('Bearer ')) return h.slice(7).trim() || null;
-  return null;
-}
+const { tokenFrom } = require('../lib/requestToken');
 
 function createClientAgentRouter({ agent }) {
   const router = express.Router();
@@ -38,7 +34,7 @@ function createClientAgentRouter({ agent }) {
   router.post('/chat', async (req, res) => {
     const requestId = req.headers['x-request-id'] || crypto.randomUUID();
 
-    const userToken = bearerFrom(req);
+    const userToken = tokenFrom(req);
     if (!userToken) {
       // No token means no identity to forward, and this service has no way to
       // manufacture one. Refuse before doing any work.
@@ -107,7 +103,7 @@ function createClientAgentRouter({ agent }) {
   router.post('/chat/stream', async (req, res) => {
     const requestId = req.headers['x-request-id'] || crypto.randomUUID();
 
-    const userToken = bearerFrom(req);
+    const userToken = tokenFrom(req);
     if (!userToken) {
       return res.status(401).json({ error: { code: 'NO_TOKEN', message: 'Authentication required.' } });
     }
@@ -147,15 +143,22 @@ function createClientAgentRouter({ agent }) {
       // A short-circuit has nothing to stream. Sent as one event over SSE
       // anyway, so a client has exactly one code path rather than two.
       res.writeHead(200, SSE_HEADERS);
-      send(res, 'start', {
+      send(res, {
+        type: 'start',
         clientId: result.clientId,
         clientName: result.clientName,
         toolsUsed: result.toolsUsed,
         toolsUnavailable: result.toolsUnavailable,
-        classification: result.meta?.classification ?? null,
+        requestId,
       });
-      send(res, 'delta', { text: result.message });
-      send(res, 'done', {
+      send(res, { type: 'chunk', content: result.message });
+      send(res, {
+        type: 'done',
+        message: result.message,
+        clientId: result.clientId,
+        clientName: result.clientName,
+        toolsUsed: result.toolsUsed,
+        toolsUnavailable: result.toolsUnavailable,
         proposedAction: result.proposedAction,
         requiresConfirmation: result.requiresConfirmation,
         meta: result.meta,
@@ -171,17 +174,29 @@ function createClientAgentRouter({ agent }) {
     let aborted = false;
     req.on('close', () => { aborted = true; });
 
+    // The gap before the first token is the dangerous one: the ERP reads are
+    // done, but a cold free-tier model can take tens of seconds to say anything,
+    // and the proxies in front of this service close a connection that has been
+    // silent for about sixty. A comment frame is not an event — the client skips
+    // any line that is not `data:` — so this keeps the socket warm without the
+    // consumer needing to know it exists.
+    const heartbeat = setInterval(() => {
+      if (!aborted && !res.writableEnded) res.write(': ping\n\n');
+    }, 15_000);
+    heartbeat.unref?.();
+
     try {
       for await (const ev of result.stream) {
         if (aborted) break;
-        const { type, ...rest } = ev;
-        send(res, type, type === 'done' ? { ...rest, requestId } : rest);
+        send(res, ev.type === 'done' ? { ...ev, requestId } : ev);
       }
     } catch (err) {
       // The generator itself failing is a bug rather than a model outage — the
       // model's own failures are yielded as an 'error' event inside it.
       logger.error({ requestId, err: err?.message }, 'client_agent_stream_broke');
-      if (!aborted) send(res, 'error', { code: 'INTERNAL', message: 'Something went wrong.' });
+      if (!aborted) send(res, { type: 'error', code: 'INTERNAL', message: 'Something went wrong.' });
+    } finally {
+      clearInterval(heartbeat);
     }
 
     return res.end();
@@ -202,13 +217,21 @@ const SSE_HEADERS = {
 /**
  * One SSE frame.
  *
+ * The event name is carried INSIDE the JSON as `type`, not only as an SSE
+ * `event:` line. That is what the consumer reads (`619-erp-frontend`,
+ * `src/lib/client-ai.ts`): it scans for `data:` lines and switches on
+ * `evt.type`, ignoring everything else — which also lets `: ping` comment
+ * frames pass through harmlessly. An `event:` line is emitted as well so the
+ * stream is well-formed SSE for anything that does listen by event name, but
+ * `type` is the field that matters and must never be dropped from the payload.
+ *
  * JSON.stringify before writing is not decoration: a payload containing a
  * newline would otherwise end the frame early, and retrieved client notes are
  * full of newlines. Encoding removes the possibility rather than relying on
  * nobody ever putting one there.
  */
-function send(res, event, data) {
-  res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+function send(res, payload) {
+  res.write(`event: ${payload.type}\ndata: ${JSON.stringify(payload)}\n\n`);
 }
 
 module.exports = { createClientAgentRouter, Body, SSE_HEADERS };
