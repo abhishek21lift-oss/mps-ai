@@ -35,10 +35,25 @@ services:
       ERP_BACKEND_URL: http://api:5000
       SERVICE_AUTH_SECRET: ${SERVICE_AUTH_SECRET}
 
+      # The calendar "this month" and "expiring soon" are answered against.
+      # Defaulted rather than required, so a studio in another timezone gets
+      # quietly wrong dates unless this is set — set it deliberately.
+      STUDIO_TIMEZONE: ${AI_STUDIO_TIMEZONE:-Asia/Kolkata}
+
+      # Caps on what may ENTER a prompt. The model's max_tokens caps only the
+      # reply; without these a client with years of attendance sets the request
+      # size. Anything cut is announced to the model rather than dropped.
+      MAX_TOOL_RESULT_CHARS: ${AI_MAX_TOOL_RESULT_CHARS:-6000}
+      MAX_CONTEXT_CHARS: ${AI_MAX_CONTEXT_CHARS:-24000}
+
       # Exact origins. The browser calls this service directly, so this must
       # list the frontend's real scheme+host.
       ALLOWED_ORIGINS: ${AI_ALLOWED_ORIGINS}
       RATE_LIMIT_MAX: ${AI_RATE_LIMIT_MAX:-30}
+      # Per-IP backstop. The token limiter runs before authentication, so a
+      # caller rotating junk tokens would otherwise get a fresh bucket each
+      # request. Keep well above RATE_LIMIT_MAX — this is for floods.
+      RATE_LIMIT_IP_MAX: ${AI_RATE_LIMIT_IP_MAX:-120}
 
       # NOTE: no DATABASE_URL and no JWT_SECRET here, and adding them will make
       # the container refuse to start. That is deliberate — see src/config.js.
