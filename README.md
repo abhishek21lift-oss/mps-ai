@@ -393,6 +393,17 @@ See `.env.example`. Required: `AI_API_KEY`, `ERP_BACKEND_URL`,
 
 ## Deployment
 
+`.dockerignore` is load-bearing, not tidiness. The Dockerfile ends in
+`COPY . .`, and **Docker does not read `.gitignore`** — so without it, building
+on any machine where you had followed the setup step above (`cp .env.example
+.env`) baked `AI_API_KEY` and `SERVICE_AUTH_SECRET` into an image layer.
+Readable by anyone who can pull it, and still there after you delete the file,
+because layers are immutable. It also excludes `node_modules`, which would
+otherwise copy the host's tree — devDependencies and all — straight over the
+`npm ci --omit=dev` install the deps stage just made. `__tests__/deploy.test.js`
+pins both.
+
+
 Independently deployable; no database, no migrations, no shared volume.
 
 ```bash

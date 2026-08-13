@@ -290,6 +290,27 @@ So `actor` is an HMAC of the token keyed with `SERVICE_AUTH_SECRET`:
 Joining `actor` back to a real user is done against the ERP's request log. That
 is the correct place for it: the ERP is the only party that ever knew the answer.
 
+## 9a. The image
+
+The service holds two secrets legitimately — `AI_API_KEY` and
+`SERVICE_AUTH_SECRET` — and the Dockerfile ends in `COPY . .`.
+
+**Docker does not read `.gitignore`.** Until `.dockerignore` existed, building
+on a machine where someone had run the README's own setup step
+(`cp .env.example .env`) put both into an image layer: readable by anyone who
+can pull it, and still present after the file is deleted, because layers are
+immutable.
+
+Worth stating plainly because of the shape of the mistake. Everything else here
+argues that this service is safe partly because it holds nothing worth stealing,
+and `config.js` refuses to boot on a forbidden secret. None of that reaches the
+two secrets it *does* hold, and none of it operates at build time.
+
+`.dockerignore` also excludes `node_modules`, which would otherwise overwrite
+the deps stage's `--omit=dev` install with the host's — shipping `jest` and
+`eslint` to production, and native modules built for whatever platform the
+developer happens to run.
+
 ## 10. Transport and abuse
 
 | Control | Detail |

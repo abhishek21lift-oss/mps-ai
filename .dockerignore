@@ -1,0 +1,48 @@
+# What must not enter the image.
+#
+# The Dockerfile ends in `COPY --chown=express:nodejs . .`, which takes the
+# entire build context. Docker does NOT read .gitignore, so without this file
+# every exclusion in .gitignore is decorative at build time.
+#
+# ── The one that matters ─────────────────────────────────────────────────────
+#
+# .env. The README tells you to create one (`cp .env.example .env`), and it then
+# holds AI_API_KEY and SERVICE_AUTH_SECRET. Build the image on a machine where
+# you have run the service, and both are baked into a layer — readable by anyone
+# who can pull it, and still there after you delete the file, because layers are
+# immutable.
+#
+# That would be a poor outcome anywhere. Here it is pointed: this service's whole
+# security argument is that it holds nothing worth stealing, and config.js
+# refuses to boot if a forbidden secret appears. None of that helps if the image
+# ships the secrets it does legitimately hold.
+.env
+.env.*
+!.env.example
+
+# ── The one that breaks the build quietly ────────────────────────────────────
+#
+# node_modules. The deps stage runs `npm ci --omit=dev` and the runner copies
+# that result in — and then `COPY . .` copies the HOST's node_modules straight
+# over it. A production image silently ships devDependencies (jest, eslint,
+# supertest), and if the host built native modules on a different platform, the
+# container gets binaries it cannot run. It also sends 67 MB through the build
+# context for nothing.
+node_modules
+
+# History, and everything in it. `.git` carries every secret ever committed and
+# then removed, which is exactly the kind of thing people believe is gone.
+.git
+.gitignore
+.gitattributes
+
+# Not needed at runtime. Smaller image, smaller attack surface, faster build.
+__tests__
+docs
+coverage
+eslint.config.js
+Dockerfile
+.dockerignore
+docker-compose.snippet.yml
+*.log
+.DS_Store
