@@ -69,6 +69,7 @@ function createClientAgentRouter({ agent }) {
         clientName: result.clientName,
         toolsUsed: result.toolsUsed,
         toolsUnavailable: result.toolsUnavailable,
+        grounding: result.grounding,
         proposedAction: result.proposedAction,
         requiresConfirmation: result.requiresConfirmation,
         meta: result.meta,

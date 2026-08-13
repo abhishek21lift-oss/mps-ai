@@ -59,7 +59,8 @@ flowchart TD
   R --> BUD["5 · BUDGET<br/>truncate + announce"]
   BUD --> F["6 · FENCE<br/>per-request nonce"]
   F --> M["7 · ANSWER<br/>router → provider → fallback"]
-  M --> O["response + provenance"]
+  M --> G["8 · CHECK FIGURES<br/>vs retrieved records"]
+  G --> O["response + provenance"]
 
   A -.-> AUD["audit"]
   R -.-> AUD
@@ -83,8 +84,8 @@ only when nothing is left that would rather have been an HTTP status:
 flowchart LR
   P["prepare()"] -->|"terminal"| H["ordinary HTTP response<br/>400 · 401 · 403 · 404"]
   P -->|"ready"| S["write SSE headers<br/>(committed to 200)"]
-  S --> E["start → delta… → done"]
-  S -.->|"model dies"| ER["start → delta… → error<br/>partial: true"]
+  S --> E["start → chunk… → done<br/>(done carries grounding)"]
+  S -.->|"model dies"| ER["start → chunk… → error<br/>partial: true"]
 ```
 
 Once SSE headers are written the response is committed to `200`. A `404`
@@ -105,6 +106,7 @@ message, and a frontend switching on status never sees it.
 | `platform/limits.js` | truncation and context budget | nothing |
 | `platform/time/studioClock.js` | civil dates in the studio's timezone | `Intl` |
 | `platform/audit/log.js` | the audit trail | crypto, logger |
+| `platform/grounding/check.js` | answer figures vs retrieved records | nothing |
 | `platform/router.js` | intent → model tier; fallback, and why streaming's differs | provider |
 | `platform/provider/openrouter.js` | the only place HTTP-to-a-model lives, buffered and streamed | fetch |
 | `integrations/erp/client.js` | the only route out to studio data | fetch |

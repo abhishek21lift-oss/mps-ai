@@ -220,6 +220,8 @@ produce its first word.
 **`done` carries the whole answer**, not just a terminator, so a client that
 dropped a chunk still ends holding the complete text.
 
+**`done` also carries `grounding`** — see below.
+
 **Provenance arrives first, not last.** The tools have already run by the time
 the stream opens, so a UI can show what the answer rests on while the answer is
 still being written.
@@ -276,6 +278,39 @@ npm run lint
 - [`docs/DECISIONS.md`](docs/DECISIONS.md) — why studio-wide questions stay in the ERP's assistant, and what follows from that
 - [`docs/ERP-INTEGRATION-FACTS.md`](docs/ERP-INTEGRATION-FACTS.md) — verified facts about `619-erp-backend`: tenancy, roles, endpoints, RAG
 - [`docs/PHASE-0-DISCOVERY.md`](docs/PHASE-0-DISCOVERY.md) — the audit this design came out of (superseded where the two disagree)
+
+## Figure checking
+
+Every answer's numerals are checked against the payloads the tools actually
+returned, and the result rides along as `grounding`:
+
+```jsonc
+{ "checked": 4, "inSource": 2, "derived": 1, "unverified": 1,
+  "figures": [ { "text": "₹4,500", "value": 4500, "line": 3,
+                 "context": "His outstanding balance is ₹4,500." } ] }
+```
+
+`figures` lists **only** what could not be accounted for. A figure counts as
+accounted for if it appears in a retrieved record, or is derivable from them by
+a count, a column total, a difference, a percentage or a rounding — the things a
+studio answer actually does with numbers.
+
+**It reports; it never censors.** Nothing rewrites, blocks or retries an answer
+on the strength of this. A checker that silently edits output is worse than none:
+the trainer loses the ability to see that anything was uncertain, and a bug in
+the checker becomes a bug in the answer. A failure inside it costs the indicator,
+not the reply.
+
+**It fails toward silence.** Small integers ("the last 3 sessions") nearly always
+find an incidental match in a JSON payload and pass, whether or not that is where
+the model got them. That is a miss, and it is the right direction: an indicator
+that cries wolf on correct answers is ignored within a week and then catches
+nothing. What it does catch is the case worth catching — a precise figure that
+appears nowhere in the records and cannot be derived from them.
+
+It checks against what *this turn* retrieved, not the client's record in the
+abstract. A weight quoted in answer to a billing question is unverified, because
+no tool fetched one.
 
 ## Grounding
 

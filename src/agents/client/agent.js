@@ -27,6 +27,7 @@ const { systemPrompt } = require('./prompt');
 const { classify, shortCircuitAnswer } = require('../../platform/intent/classifier');
 const { run: runTool } = require('../../platform/tools/registry');
 const { newFenceId, buildContext, neutralise } = require('../../platform/context/untrusted');
+const { checkGrounding } = require('../../platform/grounding/check');
 const logger = require('../../lib/logger');
 
 /** How many prior turns to replay. Enough for "what about his attendance?"; not
@@ -265,7 +266,27 @@ function createClientAgent({
       okResults,
       failed,
       context,
+      // The raw payloads, kept for the post-answer grounding check. Not the
+      // fenced text: the check needs the values as data, and re-parsing the
+      // prompt to get them back would be reconstructing what we already had.
+      sources: okResults.map((r) => r.data),
     };
+  }
+
+  /**
+   * Check the finished answer's figures against the records they came from.
+   *
+   * Never allowed to break a turn. A bug in the checker must cost the caller a
+   * missing indicator, not an answer — the answer is the product, and this is
+   * commentary on it.
+   */
+  function groundingOf(answer, sources, requestId) {
+    try {
+      return checkGrounding({ answer, sources });
+    } catch (err) {
+      logger.warn({ requestId, err: err?.message }, 'grounding_check_failed');
+      return undefined;
+    }
   }
 
   /**
@@ -283,7 +304,7 @@ function createClientAgent({
     const prepared = await prepare({ clientId, message, history, userToken, requestId, started, actor });
     if (prepared.kind === 'terminal') return prepared.response;
 
-    const { messages, intent, classification, clientName, okResults, failed, context } = prepared;
+    const { messages, intent, classification, clientName, okResults, failed, context, sources } = prepared;
 
     // 5. Answer.
     let completion;
@@ -338,12 +359,15 @@ function createClientAgent({
       latencyMs: elapsed,
     });
 
+    const grounding = groundingOf(completion.content, sources, requestId);
+
     return {
       ok: true,
       status: 200,
       message: completion.content,
       clientId,
       clientName,
+      grounding,
       // Provenance the UI can show, so a trainer can see what the answer rests on.
       toolsUsed: okResults.map((r) => r.tool),
       toolsUnavailable: failed.map((r) => ({ tool: r.tool, reason: r.message })),
@@ -391,7 +415,7 @@ function createClientAgent({
     const prepared = await prepare({ clientId, message, history, userToken, requestId, started, actor });
     if (prepared.kind === 'terminal') return prepared.response;
 
-    const { messages, intent, classification, clientName, okResults, failed, context } = prepared;
+    const { messages, intent, classification, clientName, okResults, failed, context, sources } = prepared;
 
     const toolsUsed = okResults.map((r) => r.tool);
     const toolsUnavailable = failed.map((r) => ({ tool: r.tool, reason: r.message }));
@@ -490,6 +514,7 @@ function createClientAgent({
         clientName,
         toolsUsed,
         toolsUnavailable,
+        grounding: groundingOf(text, sources, requestId),
         proposedAction: null,
         requiresConfirmation: false,
         meta: {
