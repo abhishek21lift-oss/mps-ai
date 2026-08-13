@@ -44,6 +44,12 @@ SQL" is not a rule to enforce; there is no connection to run it on.
 
 Both are asserted at boot and covered by tests.
 
+Both credentials sent to the ERP are checked at the other end. `X-Service-Auth`
+is verified by `middleware/serviceAuth.js`, mounted globally on `/api/` — as an
+*attestation*, not a credential: a valid header grants nothing, skips no
+`auth()`, and bypasses no `tenantScope()`. It only lets the ERP tell an
+AI-relayed request from a browser one.
+
 ## Tenant isolation
 
 The agent never supplies an organisation id, because no tool accepts one. A
@@ -54,13 +60,16 @@ client belongs to another organisation.
 That check runs **first**, before any other tool and before any model call — so
 a denied client costs one ERP read, produces no prompt, and spends no tokens.
 
-> **Known boundary, inherited on purpose.** Client authorisation in MY PT STUDIO
-> is *organisation*-level, not *trainer*-level: `GET /pt-os/clients/:id` filters
-> on `organization_id` only, and no trainer-level client restriction exists
-> anywhere in the ERP. A trainer can already open a colleague's client in the
-> normal UI. This service inherits exactly that boundary rather than inventing a
-> stricter one, so the assistant never disagrees with the screen beside it. If
-> trainer-level isolation is wanted, it belongs in the ERP.
+> **Known boundary, inherited on purpose.** Client authorisation on **by-id
+> reads** — the only kind this service makes — is *organisation*-level, not
+> *trainer*-level: `GET /pt-os/clients/:id` applies `orgWhere()` and no trainer
+> clause. The ERP *does* scope trainers on list and dues endpoints, and
+> `requireTrainerOwnership` exists in `middleware/rbac.js` but is mounted on no
+> route. So a trainer can already open a colleague's client in the normal UI.
+> This service inherits exactly that boundary rather than inventing a stricter
+> one, so the assistant never disagrees with the screen beside it. If
+> trainer-level isolation is wanted, it belongs in the ERP — see
+> [`docs/ERP-INTEGRATION-FACTS.md`](docs/ERP-INTEGRATION-FACTS.md).
 
 ## Prompt injection
 
@@ -202,7 +211,8 @@ npm run lint
 
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — modules, request lifecycle, tool layer, model abstraction
 - [`docs/SECURITY.md`](docs/SECURITY.md) — trust boundaries, tenant isolation, injection, audit, residual risks
-- [`docs/PHASE-0-DISCOVERY.md`](docs/PHASE-0-DISCOVERY.md) — the audit this design came out of
+- [`docs/ERP-INTEGRATION-FACTS.md`](docs/ERP-INTEGRATION-FACTS.md) — verified facts about `619-erp-backend`: tenancy, roles, endpoints, RAG
+- [`docs/PHASE-0-DISCOVERY.md`](docs/PHASE-0-DISCOVERY.md) — the audit this design came out of (superseded where the two disagree)
 
 ## Grounding
 
@@ -286,10 +296,6 @@ conversation history is supplied by the caller each turn rather than stored here
 
 Honest list; none of it is stubbed to look finished.
 
-- **ERP-side verification of `X-Service-Auth`.** This service sends the header on
-  every call; the ERP does not yet check it. Until that lands, the *user* JWT is
-  doing all the authorisation work (which is the part that matters for tenancy)
-  and the service secret is not yet an enforced second factor.
 - **Frontend integration.** No "Ask AI" entry on the client profile yet.
 - **Write actions** and the confirm-before-execute flow.
 - **Feedback** (👍/👎) and the evaluation harness.

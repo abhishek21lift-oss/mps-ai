@@ -280,10 +280,8 @@ Honest list; none of it is stubbed to look finished.
   the agent report a fabricated failure as fact.
 - **Role-aware tool gating.** Blocked on the ERP's role model.
 - **RAG / knowledge base.** Needs a product decision on where documents live.
-- **ERP-side verification of `X-Service-Auth`.** This service sends it; the ERP
-  does not yet check it.
-- **Trainer-level object authorisation.** Does not exist in the ERP; see
-  SECURITY.md §7.
+- **Trainer-level object authorisation on client-by-id reads.** Not present in
+  the ERP for these endpoints; see SECURITY.md §7.
 - **Streaming**, **write actions**, **feedback and evaluation harness**,
   **frontend integration**, **assessment history**.
 

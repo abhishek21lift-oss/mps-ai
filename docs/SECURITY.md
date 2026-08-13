@@ -166,12 +166,27 @@ If the classifier were the boundary, the first case would be a breach. It is not
 A write request is answered, not refused: the agent produces the content and
 says it must be entered in the app, and never implies an action has been taken.
 
-## 7. Known boundary: authorisation is organisation-level, not trainer-level
+## 7. Known boundary: client-by-id reads are organisation-level, not trainer-level
 
-Client authorisation in MY PT STUDIO is **organisation-level**.
-`GET /pt-os/clients/:id` filters on `organization_id` only, and no trainer-level
-client restriction exists anywhere in the ERP. **A trainer can already open a
-colleague's client in the normal UI.**
+**Verified against `619-erp-backend`.** The picture is more nuanced than
+"trainer scoping does not exist", and the nuance is the whole point:
+
+| ERP endpoint | Scoping |
+|---|---|
+| `GET /pt-os/clients` (list) | org **and trainer** — `role === 'trainer' ? trainer_id : query.trainer_id` |
+| `GET /reports/dues/summary` | org **and trainer** — same pattern |
+| `GET /pt-os/clients/:id` | **org only** — `orgWhere(req, params, 'c.organization_id')`, no trainer clause |
+| `GET /pt-os/clients/:id/*` | **org only** — child records gate on `clientInOrg()` |
+
+So a trainer's *lists* are already narrowed to their own roster, but a **direct
+read by client id is not**. `requireTrainerOwnership` exists in
+`middleware/rbac.js` and is **not mounted on any route**.
+
+The whole `/api/pt-os` surface is mounted behind `auth, requireStaff`, so the
+`member` role is excluded outright.
+
+**A trainer can therefore already open a colleague's client in the normal UI**,
+and every endpoint this service calls is a by-id read.
 
 This service inherits exactly that boundary rather than inventing a stricter
 one, so the assistant never disagrees with the screen beside it.
@@ -181,6 +196,21 @@ Implementing it *here* would create a second, stricter authorisation model that
 contradicts the application's own behaviour — the drifting-copy problem again.
 **If trainer-level isolation is wanted, it belongs in the ERP**, and this
 service will inherit it for free the moment it lands.
+
+The change there is small and well-signposted: `requireTrainerOwnership(pool)`
+already exists and already queries `clients`/`pt_clients` for
+`trainer_id = req.user.trainer_id`. Mounting it on the by-id routes would close
+the gap in one line each — but it is a **product decision, not a bug fix**,
+because it would also change what the existing UI can open.
+
+### One more thing worth knowing: `x-org-id`
+
+`tenantScope()` lets a `super_admin` target any organisation via the `x-org-id`
+header, and operate platform-wide (no filter at all) when it is absent. This
+service **never sends that header** — the ERP client builds its own header set
+and does not echo anything from the incoming request, asserted by red-team case
+12. But it does mean a `super_admin` using this assistant sees whatever a
+`super_admin` sees, which is by design and inherited, not granted here.
 
 ## 8. Secrets
 
@@ -277,7 +307,7 @@ at all.
 
 | Risk | Status |
 |---|---|
-| `X-Service-Auth` unverified by the ERP | **Open.** This service sends it on every call; the ERP does not yet check it. Until it does, the user JWT is doing all the authorisation work — which is the part that matters for tenancy — and the service secret is not yet an enforced second factor. **Fix belongs in the ERP.** |
+| ~~`X-Service-Auth` unverified by the ERP~~ | **Closed — it was never open.** Verified against `619-erp-backend`: `middleware/serviceAuth.js` is mounted globally at `server.js:327` (`app.use('/api/', serviceAuth)`), compares in constant time over SHA-256 digests so no length is leaked, and fails closed when the header is presented but no secret is configured. Earlier revisions of this document listed it as unbuilt; that was written before the ERP source could be read, and was wrong. |
 | No trainer-level object authorisation | **Open by design.** Does not exist in the ERP; inheriting it is deliberate (§7). |
 | Studio-wide tools will widen the injection blast radius | **Future.** Today's safety rests partly on "no tool returns more than one client". Once one does, fencing stops being defence-in-depth and starts being load-bearing. Re-audit before shipping Phase 5. |
 | Model provider sees retrieved client data | **Accepted.** Mitigated by data minimisation: only the tools a question needs are run, so a renewal-date question does not ship medical notes. |
