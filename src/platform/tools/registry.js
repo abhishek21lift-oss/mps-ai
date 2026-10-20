@@ -86,7 +86,11 @@ define({
   summary: 'Attendance records for this client.',
   label: 'attendance',
   args: z.object({ clientId: ClientId }),
-  endpoint: ({ clientId }) => `/api/clients/${encodeURIComponent(clientId)}/attendance`,
+  // MPS-02 (round-2 audit): attendance and payments moved from /api/clients to
+  // /api/pt-os/clients in the ERP (server.js comment "moved to /api/pt-os/
+  // clients"; routes live at pt-os.routes.js:247 and :250). The old paths
+  // 404 on every call, which is why "Show recent attendance" degraded.
+  endpoint: ({ clientId }) => `/api/pt-os/clients/${encodeURIComponent(clientId)}/attendance`,
 });
 
 define({
@@ -94,7 +98,8 @@ define({
   summary: 'Payment history for this client.',
   label: 'payments',
   args: z.object({ clientId: ClientId }),
-  endpoint: ({ clientId }) => `/api/clients/${encodeURIComponent(clientId)}/payments`,
+  // Same move as attendance above: /api/pt-os/clients/:id/payments.
+  endpoint: ({ clientId }) => `/api/pt-os/clients/${encodeURIComponent(clientId)}/payments`,
 });
 
 define({
@@ -103,6 +108,34 @@ define({
   label: 'communication history',
   args: z.object({ clientId: ClientId }),
   endpoint: ({ clientId }) => `/api/pt-os/clients/${encodeURIComponent(clientId)}/communication`,
+});
+
+/* ── Knowledge tool ───────────────────────────────────────────────────────────
+   MY PT STUDIO methodology and policy grounding (MPTS). One read-only search of
+   the ERP's approved knowledge corpora — the same corpus, versions and approval
+   gate the ERP's own generators are grounded with (route 'knowledge.search').
+
+   Search runs under the caller's own token, so retrieval stays scoped to the
+   caller's studio plus approved global documents; nothing here states or
+   enforces tenancy, for the same reason the client tools do not. A tool that
+   returned corpora it invented elsewhere would be the one §14 fabrication that
+   could not be caught by fencing — so `q` is required and validated, and the
+   results are fenced like every other tool's data. */
+define({
+  name: 'search_knowledge',
+  summary: 'Search approved MY PT STUDIO methodology and policy documents. Returns passage excerpts in ranked order with the document title each came from — ground your method, policy and norm claims in these passages and name the document you used.',
+  label: 'knowledge search',
+  // Mirrors the ERP endpoint's own validation: q 1..500 chars, topK 1..10.
+  // These are NOT duplicate authorisation decisions — only parameter shapes.
+  args: z.object({
+    q: z.string().trim().min(1).max(500, 'q must be 500 characters or fewer'),
+    topK: z.number().int().min(1).max(10).optional(),
+  }),
+  endpoint: (a) => {
+    const qs = new URLSearchParams({ q: a.q });
+    if (a.topK) qs.set('topK', String(a.topK));
+    return `/api/ai/knowledge/search?${qs.toString()}`;
+  },
 });
 
 function get(name) {
