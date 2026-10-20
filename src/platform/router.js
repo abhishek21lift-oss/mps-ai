@@ -17,6 +17,7 @@
 // request, and §44 is explicit that runaway cost is a failure mode of its own.
 
 const logger = require('../lib/logger');
+const { inferUsageKnown } = require('../lib/usageLedger');
 
 const INTENT_TIERS = {
   // Short factual lookups — "when does the package expire?"
@@ -33,34 +34,48 @@ function resolveModel(config, intent) {
 }
 
 function createRouter({ config, provider }) {
-  async function chat({ intent = 'analysis', messages, temperature, maxTokens }) {
+  // Every model attempt — primary success, fallback success or both failures —
+  // is recorded so the usage ledger can account for what was actually spent
+  // (MPS-01), including the request that produced NO answer at all.
+  async function chat({ intent = 'analysis', messages, temperature, maxTokens, onDelta }) {
     const { model, tier } = resolveModel(config, intent);
+    const attempts = [];
 
     try {
-      const out = await provider.generate({ model, messages, temperature, maxTokens });
-      return { ...out, intent, tier, used_fallback: false };
+      const out = await provider.generate({ model, messages, temperature, maxTokens, onDelta });
+      attempts.push({ model: out.model || model, ok: true, usage: out.usage ?? null, usageKnown: inferUsageKnown(out), latency_ms: out.latency_ms ?? 0 });
+      return { ...out, intent, tier, used_fallback: false, attempts };
     } catch (primaryErr) {
       logger.warn({ model, intent, code: primaryErr.code }, 'ai_primary_failed');
+      attempts.push({ model, ok: false, code: primaryErr.code || 'AI_FAILED', latency_ms: 0 });
+      attachAttempts(primaryErr, attempts);
 
       if (config.AI_FALLBACK_MODEL === model) throw primaryErr;
 
       try {
         const out = await provider.generate({
-          model: config.AI_FALLBACK_MODEL, messages, temperature, maxTokens,
+          model: config.AI_FALLBACK_MODEL, messages, temperature, maxTokens, onDelta,
         });
         logger.info({ fallback: config.AI_FALLBACK_MODEL, intent }, 'ai_fallback_success');
-        return { ...out, intent, tier, used_fallback: true };
+        attempts.push({ model: out.model || config.AI_FALLBACK_MODEL, ok: true, usage: out.usage ?? null, usageKnown: inferUsageKnown(out), latency_ms: out.latency_ms ?? 0 });
+        return { ...out, intent, tier, used_fallback: true, attempts };
       } catch (fallbackErr) {
         logger.error({ intent, code: fallbackErr.code }, 'ai_all_models_failed');
+        attempts.push({ model: config.AI_FALLBACK_MODEL, ok: false, code: fallbackErr.code || 'AI_FAILED', latency_ms: 0 });
         const e = new Error('The AI service is temporarily unavailable.');
         e.code = 'ALL_MODELS_FAILED';
         e.status = 503;
+        attachAttempts(e, attempts);
         throw e;
       }
     }
   }
 
   return { chat, resolveModel: (intent) => resolveModel(config, intent) };
+}
+
+function attachAttempts(err, attempts) {
+  try { err.attempts = attempts; } catch { /* frozen errors can't carry it */ }
 }
 
 module.exports = { createRouter, INTENT_TIERS };

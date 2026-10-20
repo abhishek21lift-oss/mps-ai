@@ -12,6 +12,9 @@ RUN addgroup --system --gid 1001 nodejs && \
     adduser --system --uid 1001 express
 COPY --from=deps --chown=express:nodejs /app/node_modules ./node_modules
 COPY --chown=express:nodejs . .
+# Writable home for the usage ledger (MPS-01). Non-root user cannot create
+# /app/logs itself; an absent dir would silently disable the audit file.
+RUN mkdir -p /app/logs && chown -R express:nodejs /app/logs
 USER express
 EXPOSE 4100
 ENV NODE_ENV=production \

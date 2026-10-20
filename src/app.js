@@ -12,6 +12,7 @@ const { createOpenRouterProvider } = require('./platform/provider/openrouter');
 const { createRouter } = require('./platform/router');
 const { createClientAgent } = require('./agents/client/agent');
 const { createClientAgentRouter } = require('./api/clientAgent');
+const { createUsageLedger } = require('./lib/usageLedger');
 const { list: listTools } = require('./platform/tools/registry');
 const logger = require('./lib/logger');
 
@@ -23,9 +24,13 @@ function buildApp({ config, erp, provider }) {
   app.use(helmet());
   app.use(express.json({ limit: '128kb' }));
 
-  // §47 — an explicit allow-list. `credentials` stays off: the browser sends
-  // the token in an Authorization header it sets itself, so this service never
-  // needs cookies, and not accepting them removes CSRF from the threat model.
+  // §47 — an explicit allow-list. `credentials` stays off, deliberately, and
+  // this is now MORE important, not less (WIRE-01 fix): the browser's session
+  // cookie reaches us same-origin only (through the Next.js /ai rewrite), where
+  // CORS never applies. Cross-site sends are impossible to accept anyway — the
+  // cookie is SameSite=strict — so a service-side credentials flag cannot open
+  // a CSRF hole that browsers would not already close. Non-browser callers
+  // still send a Bearer header, which needs no credentials mode at all.
   app.use(cors({
     origin(origin, cb) {
       if (!origin) return cb(null, true);              // server-to-server, curl
@@ -66,7 +71,8 @@ function buildApp({ config, erp, provider }) {
   });
 
   const router = createRouter({ config, provider });
-  const agent = createClientAgent({ erp, router });
+  const ledger = createUsageLedger({ config });
+  const agent = createClientAgent({ config, erp, router, ledger });
 
   app.use('/ai/client-agent', limiter, createClientAgentRouter({ agent }));
 
