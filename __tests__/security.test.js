@@ -170,7 +170,17 @@ describe('§51.5/6 / §30 / §31 — the tool surface is closed', () => {
   test('every registered tool is a client read — no SQL, shell or generic fetch', () => {
     const names = list().map((t) => t.name);
     expect(names.length).toBeGreaterThan(0);
-    for (const n of names) expect(n).toMatch(/^getClient/);
+    // DECISION D4 (mirrors origin/claude/rag-wiring 89e17d0, re-expressed rather
+    // than relaxed): tools are single-client reads, with ONE named exemption
+    // for studio-document retrieval, asserted by value so a second
+    // studio-scoped tool fails here and forces the decision to be revisited.
+    const STUDIO_DOCUMENT_TOOLS = ['search_knowledge'];
+    expect(names.filter((n) => STUDIO_DOCUMENT_TOOLS.includes(n))).toEqual([
+      'search_knowledge',
+    ]);
+    for (const n of names) {
+      if (!STUDIO_DOCUMENT_TOOLS.includes(n)) expect(n).toMatch(/^getClient/);
+    }
     for (const forbidden of ['executeSQL', 'runQuery', 'query', 'fetch', 'exec', 'runCommand']) {
       expect(get(forbidden)).toBeNull();
     }
@@ -190,6 +200,38 @@ describe('§51.5/6 / §30 / §31 — the tool surface is closed', () => {
     });
     expect(res.ok).toBe(false);
     expect(res.code).toBe('BAD_ARGS');
+    expect(erp.calls).toHaveLength(0);
+  });
+});
+
+describe('§6 — search_knowledge, the MPTS grounding tool', () => {
+  test('searches under the caller token on the knowledge search endpoint', async () => {
+    const erp = fakeErp(async () => ({ data: { data: [{ title: 'MPTS SOP', content: '...', similarity: 0.9 }] }, latency_ms: 1 }));
+    const { run } = require('../src/platform/tools/registry');
+
+    const res = await run({
+      name: 'search_knowledge',
+      args: { q: 'how to progress squats', topK: 3 },
+      erp,
+      userToken: 'tok-1',
+    });
+
+    expect(res.ok).toBe(true);
+    expect(erp.calls).toHaveLength(1);
+    expect(erp.calls[0].path.startsWith('/api/ai/knowledge/search?')).toBe(true);
+    expect(erp.calls[0].path).toContain('q=how+to+progress+squats');
+    expect(erp.calls[0].path).toContain('topK=3');
+    // The studio's own documents, under the caller's own credentials — the
+    // tool never presents a different identity to the ERP.
+    expect(erp.calls[0].userToken).toBe('tok-1');
+  });
+
+  test('args mirror the ERP endpoint contract: q 1..500, topK 1..10', async () => {
+    const erp = fakeErp(async () => ({ data: {}, latency_ms: 1 }));
+    const { run } = require('../src/platform/tools/registry');
+    for (const bad of [{ q: '' }, { q: ' '.repeat(4) }, { q: 'x'.repeat(501) }, { q: 'ok', topK: 0 }, { q: 'ok', topK: 11 }]) {
+      expect((await run({ name: 'search_knowledge', args: bad, erp, userToken: 't' })).code).toBe('BAD_ARGS');
+    }
     expect(erp.calls).toHaveLength(0);
   });
 });

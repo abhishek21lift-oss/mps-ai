@@ -41,6 +41,40 @@ const Schema = z.object({
   AI_FALLBACK_MODEL: z.string().min(1).default('nvidia/nemotron-3-ultra-550b-a55b:free'),
   AI_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().default(60_000),
 
+  // ── Cost policy (round-2 remediation, MPS-01) ─────────────────────────────
+  //
+  // Free tier by construction: a paid model here spends the SAME OpenRouter
+  // account the ERP bills against, and nothing in this service meters cost.
+  // So paid slugs are refused at boot unless an operator says yes explicitly —
+  // either by naming the models allowed (tight) or by accepting paid models
+  // outright (loose).
+  //
+  // AI_ALLOWED_MODELS is the tight form: comma-separated exact slugs, and BOTH
+  // configured models must be on it. ALLOW_PAID_MODELS=true is the loose
+  // form: any slug is accepted. Neither changes at runtime — config is
+  // validated once at boot and frozen.
+  AI_ALLOWED_MODELS: z.string().default(''),
+  ALLOW_PAID_MODELS: z.enum(['true', 'false']).default('false'),
+
+  // ── Studio AI quota (shared with the ERP's ai_usage_log) ─────────────────
+  //
+  // The agent asks the ERP for the caller's studio quota before every model
+  // call. In `monitor` mode a spent studio is logged, not refused, so an
+  // operator can watch the numbers before enforcement bites anyone. In
+  // `enforce` mode the check is FAIL-CLOSED (round-2 Phase B, req. 6): if
+  // the limit cannot be evaluated — ERP unreachable, malformed answer — the
+  // model call is refused rather than made unverified. `off` skips the check
+  // entirely (usage ledger keeps running).
+  AI_QUOTA_MODE: z.enum(['monitor', 'enforce', 'off']).default('monitor'),
+
+  // ── Usage ledger (round-2 remediation, MPS-01) ───────────────────────────
+  //
+  // One JSONL line per attempt — ids, counts, latencies and outcome codes
+  // only. Never a prompt, never a client note, never a JWT. Explicit empty
+  // string disables it. In `test` env it stays off unless pointed at a path,
+  // so test runs leave no records behind.
+  USAGE_LEDGER_FILE: z.string().optional(),
+
   // ── ERP backend — the authority ───────────────────────────────────────────
   ERP_BACKEND_URL: z.string().url('ERP_BACKEND_URL must be an absolute URL'),
   ERP_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().default(10_000),
@@ -101,7 +135,47 @@ function load(env = process.env) {
     throw new Error('ALLOWED_ORIGINS must not contain "*" — this API is authenticated.');
   }
 
-  return Object.freeze({ ...cfg, allowedOrigins });
+  // ── Cost policy enforcement (MPS-01) ───────────────────────────────────────
+  // Free tier by default: a paid model would spend the ERP's OpenRouter
+  // account with no metering behind it. Fail loudly at boot, never at
+  // request time — config is frozen once valid.
+  const isFreeSlug = (m) => m.endsWith(':free');
+  const allowlist = cfg.AI_ALLOWED_MODELS
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  if (allowlist.length > 0) {
+    const notListed = [cfg.AI_PRIMARY_MODEL, cfg.AI_FALLBACK_MODEL]
+      .filter((m) => !allowlist.includes(m));
+    if (notListed.length) {
+      throw new Error(
+        `AI_ALLOWED_MODELS does not include: ${notListed.join(', ')}. `
+        + `Allowed: ${allowlist.join(', ')}.`,
+      );
+    }
+  } else if (cfg.ALLOW_PAID_MODELS !== 'true') {
+    const paid = [cfg.AI_PRIMARY_MODEL, cfg.AI_FALLBACK_MODEL]
+      .filter((m) => !isFreeSlug(m));
+    if (paid.length) {
+      throw new Error(
+        `Refusing paid models (${paid.join(', ')}) without ALLOW_PAID_MODELS=true `
+        + 'or an explicit AI_ALLOWED_MODELS list — this service shares the ERP\'s '
+        + 'OpenRouter account and meters nothing itself.',
+      );
+    }
+  }
+
+  // ── Usage ledger target ────────────────────────────────────────────────────
+  // Explicit empty string wins (disabled). In `test` env a path must be set
+  // explicitly, so test runs never leave records in the working tree.
+  const usageLedgerFile = (env.USAGE_LEDGER_FILE ?? cfg.USAGE_LEDGER_FILE) === ''
+    ? null
+    : (cfg.NODE_ENV === 'test'
+      ? (env.USAGE_LEDGER_FILE || null)
+      : (env.USAGE_LEDGER_FILE || cfg.USAGE_LEDGER_FILE || 'logs/usage.jsonl'));
+
+  return Object.freeze({ ...cfg, allowedOrigins, usageLedgerFile });
 }
 
 module.exports = { load, Schema, FORBIDDEN, assertNoForbiddenSecrets };

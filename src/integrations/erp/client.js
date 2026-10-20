@@ -67,6 +67,21 @@ function createErpClient({ config, fetchImpl = globalThis.fetch }) {
    * @param {string} [opts.requestId]
    */
   async function get(path, { userToken, requestId } = {}) {
+    return request('GET', path, null, { userToken, requestId });
+  }
+
+  /**
+   * POST an ERP endpoint as the end user — currently only the usage-ingest
+   * report (round-2 Phase B): the ERP resolves which user/studio rows belong
+   * to from the FORWARDED token, so usage records carry real identity without
+   * this service ever reading one.
+   */
+  async function post(path, body, { userToken, requestId } = {}) {
+    return request('POST', path, body, { userToken, requestId });
+  }
+
+  /** The shared transport. Identity = user token + service attestation, always. */
+  async function request(method, path, jsonBody, { userToken, requestId } = {}) {
     if (!userToken) {
       // Refusing here rather than calling unauthenticated: an unauthenticated
       // ERP call would 401 anyway, but the failure would look like an ERP
@@ -82,7 +97,7 @@ function createErpClient({ config, fetchImpl = globalThis.fetch }) {
     let res;
     try {
       res = await fetchImpl(url, {
-        method: 'GET',
+        method,
         headers: {
           // The user's identity. The ERP resolves org and role from this.
           Authorization: `Bearer ${userToken}`,
@@ -90,7 +105,9 @@ function createErpClient({ config, fetchImpl = globalThis.fetch }) {
           'X-Service-Auth': config.SERVICE_AUTH_SECRET,
           'X-Request-Id': requestId || '',
           Accept: 'application/json',
+          ...(jsonBody !== undefined ? { 'Content-Type': 'application/json' } : {}),
         },
+        body: jsonBody !== undefined ? JSON.stringify(jsonBody) : undefined,
         signal: controller.signal,
       });
     } catch (err) {
@@ -131,7 +148,7 @@ function createErpClient({ config, fetchImpl = globalThis.fetch }) {
     return { data: body, latency_ms };
   }
 
-  return { get };
+  return { get, post };
 }
 
 module.exports = { createErpClient, ErpError, PASSTHROUGH_STATUS };
