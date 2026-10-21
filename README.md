@@ -202,6 +202,10 @@ anywhere except the frontend origin.
 Health: `GET /health`. Stateless, so scale horizontally without coordination —
 conversation history is supplied by the caller each turn rather than stored here.
 
+**Third-party data handling is unresolved.** What leaves the service, what stays
+in it, and the questions that need an answer before health-adjacent free text is
+allowed are in [`docs/DATA-POLICY.md`](docs/DATA-POLICY.md).
+
 ## Not built yet
 
 Honest list; none of it is stubbed to look finished.
