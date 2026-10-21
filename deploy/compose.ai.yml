@@ -1,0 +1,87 @@
+# Standalone Compose project for mps-ai on the MY PT STUDIO box.
+#
+# Run by deploy/deploy-ai.sh as project `mps-ai`, NOT merged into
+# /opt/myptstudio/docker-compose.yml. The base file is unversioned on the box
+# and belongs to the ERP; editing it by hand is how the AI service went
+# undeployed in the first place. This file is versioned, and the only thing it
+# shares with the ERP is its Docker network.
+#
+# Why the ERP network: the agent calls the API on every turn. Attached here it
+# is a container-to-container hop (http://myptstudio-backend:5000); in its own
+# project it would have to leave the host through nginx and come back.
+#
+# Do NOT add DATABASE_URL or JWT_SECRET to `environment` below — src/config.js
+# refuses to boot when either is present, on purpose.
+services:
+  ai:
+    image: mps-ai:current
+    container_name: myptstudio-ai
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      # Baked into the image and reported by /health. The deploy script
+      # exports GIT_SHA before building and refuses to call the deploy done
+      # until /health echoes it back.
+      args:
+        GIT_SHA: ${GIT_SHA:-unknown}
+    restart: unless-stopped
+
+    # Loopback only, exactly like `api` and the frontend: nginx is the route
+    # in (myptstudio.com/ai/*). Do not bind 0.0.0.0 to "fix" a connection.
+    ports:
+      - '127.0.0.1:4100:4100'
+
+    environment:
+      NODE_ENV: production
+      PORT: '4100'
+      LOG_LEVEL: ${AI_LOG_LEVEL:-info}
+
+      AI_PROVIDER: openrouter
+      # One OpenRouter account, one bill: same key the ERP uses.
+      AI_API_KEY: ${OPENROUTER_API_KEY:?set OPENROUTER_API_KEY in /opt/myptstudio/.env}
+      AI_PRIMARY_MODEL: ${AI_PRIMARY_MODEL:-openai/gpt-oss-120b:free}
+      AI_FALLBACK_MODEL: ${AI_FALLBACK_MODEL:-nvidia/nemotron-3-ultra-550b-a55b:free}
+      AI_QUOTA_MODE: ${AI_QUOTA_MODE:-monitor}
+
+      # Survives container replacement; see the volume below.
+      USAGE_LEDGER_FILE: /app/logs/usage.jsonl
+
+      # The API runs under this container name on the shared network (proven
+      # by the WhatsApp gateway's WA_BACKEND_URL), not the compose alias `api`.
+      ERP_BACKEND_URL: ${AI_ERP_BACKEND_URL:-http://myptstudio-backend:5000}
+
+      # Must be the SAME value the ERP holds, otherwise every forwarded call
+      # is rejected. Never generated here: a fresh value breaks auth loudly
+      # instead of silently rotating a shared secret.
+      SERVICE_AUTH_SECRET: ${SERVICE_AUTH_SECRET:?set SERVICE_AUTH_SECRET in /opt/myptstudio/.env}
+
+      # Exact browser origin(s). nginx forwards the Origin header untouched.
+      ALLOWED_ORIGINS: ${AI_ALLOWED_ORIGINS:?set AI_ALLOWED_ORIGINS in /opt/myptstudio/.env}
+
+      RATE_LIMIT_MAX: ${AI_RATE_LIMIT_MAX:-30}
+
+    volumes:
+      - mps-ai-logs:/app/logs
+
+    networks:
+      - erp
+
+    stop_grace_period: 15s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '5'
+
+    mem_limit: ${AI_MEM_LIMIT:-512m}
+
+networks:
+  erp:
+    external: true
+    # Resolved from the running backend by deploy-ai.sh, never guessed: the
+    # network name depends on how the base compose project was created.
+    name: ${AI_NETWORK_NAME:?deploy-ai.sh must resolve the ERP Docker network}
+
+volumes:
+  mps-ai-logs:

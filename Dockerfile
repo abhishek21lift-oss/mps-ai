@@ -15,6 +15,12 @@ COPY --chown=express:nodejs . .
 # Writable home for the usage ledger (MPS-01). Non-root user cannot create
 # /app/logs itself; an absent dir would silently disable the audit file.
 RUN mkdir -p /app/logs && chown -R express:nodejs /app/logs
+
+# Build metadata, not configuration: /health reports it so a deploy can prove
+# which commit the running process actually is. A plain build says "unknown".
+ARG GIT_SHA=unknown
+ENV GIT_SHA=${GIT_SHA}
+
 USER express
 EXPOSE 4100
 ENV NODE_ENV=production \

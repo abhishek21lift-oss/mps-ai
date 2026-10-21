@@ -1,0 +1,89 @@
+name: Deploy mps-ai to VPS
+
+# ── Gated on CI ─────────────────────────────────────────────────────────────
+#
+# This service holds a service-auth secret for the ERP and the OpenRouter key,
+# so a red build never ships. `workflow_run` fires for every completed CI run
+# on the default branch; the job-level `if` keeps the failed and cancelled
+# ones out.
+#
+# `branches` is the HEAD BRANCH OF THE CI RUN, not the branch being deployed:
+# pull-request runs carry the PR branch and are therefore excluded. If the
+# default branch is renamed, this filter and the one in ci.yml move together.
+on:
+  workflow_run:
+    workflows: ["CI — Lint · Test"]
+    types: [completed]
+    branches: [claude/session-01dcjf1c88rf5nfdukc-o1vv0m-5l89cs]
+  # Manual deploy and rollback. `sha` may name any commit already on origin;
+  # blank deploys this branch's head. Needed because a push made with an app or
+  # bot token does not trigger `push` workflows — so CI never runs, so
+  # `workflow_run` never fires — and because a rollback must not wait for CI.
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: 'Commit SHA to deploy (blank = this branch head)'
+        required: false
+        type: string
+
+concurrency:
+  group: deploy-vps-mps-ai
+  # Never cancel a deploy halfway: that would leave the compose project between
+  # two images. A queued run is cheaper than a half-applied one.
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy to VPS
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    steps:
+      - name: Resolve and validate the target commit
+        id: target
+        env:
+          CANDIDATE: ${{ github.event.workflow_run.head_sha || inputs.sha || github.sha }}
+        run: |
+          if ! printf '%s' "$CANDIDATE" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error::not a full 40-character commit SHA: '$CANDIDATE'"
+            exit 1
+          fi
+          echo "sha=$CANDIDATE" >> "$GITHUB_OUTPUT"
+          echo "Trigger: ${{ github.event_name }}"
+          echo "CI:      ${{ github.event.workflow_run.conclusion || 'n/a (manual dispatch)' }}"
+          echo "Commit:  $CANDIDATE"
+
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.USERNAME }}
+          key: ${{ secrets.SSH_KEY }}
+          timeout: 60s
+          command_timeout: 20m
+          script_stop: true
+          script: |
+            set -e
+            REPO=/opt/myptstudio/mps-ai
+            BRANCH=claude/session-01dcjf1c88rf5nfdukc-o1vv0m-5l89cs
+
+            if [ ! -d "$REPO/.git" ]; then
+              git clone https://github.com/abhishek21lift-oss/mps-ai.git "$REPO"
+            fi
+            git -C "$REPO" fetch --prune origin
+
+            # Refresh the deploy script from the default branch and run a copy:
+            # the script checks out the target sha inside the repo, and a shell
+            # script that rewrites itself mid-run can lose the rest of itself.
+            # Consequence: rollback targets must contain deploy/, which every
+            # commit from the one that introduced it does.
+            git -C "$REPO" checkout --force --detach "origin/$BRANCH"
+            cp "$REPO/deploy/deploy-ai.sh" /tmp/mps-ai-deploy.sh
+
+            # The sha was validated as 40 lowercase hex characters above, so it
+            # is safe to interpolate. deploy-ai.sh re-validates it anyway.
+            bash /tmp/mps-ai-deploy.sh "${{ steps.target.outputs.sha }}"
