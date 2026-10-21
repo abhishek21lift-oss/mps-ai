@@ -31,14 +31,18 @@ services:
 
       AI_PROVIDER: openrouter
       # Reuse the key the ERP already uses — one OpenRouter account, one bill.
-      AI_API_KEY: ${OPENROUTER_API_KEY}
+      # Required: without it the first question is a 401, not a boot failure.
+      AI_API_KEY: ${OPENROUTER_API_KEY:?OPENROUTER_API_KEY is required by the AI service}
       AI_PRIMARY_MODEL: ${AI_PRIMARY_MODEL:-openai/gpt-oss-120b:free}
       AI_FALLBACK_MODEL: ${AI_FALLBACK_MODEL:-nvidia/nemotron-3-ultra-550b-a55b:free}
 
       # `api` is the service name on the compose network. Container-to-container,
       # so this never touches nginx or the public internet.
       ERP_BACKEND_URL: http://api:5000
-      SERVICE_AUTH_SECRET: ${SERVICE_AUTH_SECRET}
+      # Required, and it must be the SAME string as the ERP's own
+      # SERVICE_AUTH_SECRET. Left blank it used to start and answer 503 on
+      # every internal call, which read like an outage; compose now refuses.
+      SERVICE_AUTH_SECRET: ${SERVICE_AUTH_SECRET:?SERVICE_AUTH_SECRET is required and must equal the ERP's}
 
       # Exact origins. The browser never calls the container directly — its
       # traffic arrives through nginx (myptstudio.com location /ai/, see
@@ -46,11 +50,19 @@ services:
       # header untouched, so this must still list the frontend's real
       # scheme+host. A 403 from mps-ai with the route wired is this list
       # missing the origin.
-      ALLOWED_ORIGINS: ${AI_ALLOWED_ORIGINS}
+      ALLOWED_ORIGINS: ${AI_ALLOWED_ORIGINS:?AI_ALLOWED_ORIGINS is required (the frontend's scheme+host, e.g. https://myptstudio.com)}
       RATE_LIMIT_MAX: ${AI_RATE_LIMIT_MAX:-30}
 
       # NOTE: no DATABASE_URL and no JWT_SECRET here, and adding them will make
       # the container refuse to start. That is deliberate — see src/config.js.
+    # The default ledger path is logs/usage.jsonl inside /app. Without this
+    # volume a restart drops the only local audit trail of AI spend.
+    volumes:
+      - ai-logs:/app/logs
     depends_on:
       api:
         condition: service_started
+
+# Add this to the target file's top-level `volumes:` block as well (once).
+volumes:
+  ai-logs:

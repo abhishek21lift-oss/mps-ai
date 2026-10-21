@@ -104,6 +104,7 @@ Read-only. Each maps to exactly one endpoint verified to exist in
 | `getClientCommunication` | `GET /api/pt-os/clients/:id/communication` |
 | `getClientAttendance` | `GET /api/clients/:id/attendance` |
 | `getClientPayments` | `GET /api/clients/:id/payments` |
+| `search_knowledge` | `GET /api/ai/knowledge/search?q=…&topK=…` |
 
 Tool selection is deterministic pattern matching (`agents/client/planner.js`),
 not a model call — one round trip instead of two, and only the data the question
@@ -132,12 +133,32 @@ to a model provider.
   "requestId": "…" }
 ```
 
-`401` no token · `403` not authorised · `404` no such client *in your studio* ·
-`429` rate limited · `503` all models failed.
+`401` no token · `403` not authorised · `403 AI_NOT_ENABLED` the studio's plan
+does not include the AI suite · `404` no such client *in your studio* ·
+`429` rate limited · `503` entitlement or quota unverifiable, service
+authentication unconfigured, or all models failed.
 
-`proposedAction` is always `null` in Phase 1 — the field exists so the
-confirm-before-write contract has a shape from day one and adding a write is
-additive rather than a redesign.
+`proposedAction` is always `null` — the field exists so the confirm-before-write
+contract has a shape from day one and adding a write is additive rather than a
+redesign.
+
+### `POST /ai/client-agent/chat/stream`
+
+The route the panel uses: same body and credentials, the answer as Server-Sent
+Events.
+
+```
+start  { clientId, clientName, toolsUsed, toolsUnavailable, requestId }
+chunk  { content: "<delta since the previous chunk>" }
+done   { message, clientId, clientName, toolsUsed, toolsUnavailable,
+         proposedAction, requiresConfirmation, meta, requestId }
+error  { code, message, partial, status }
+```
+
+`: ping` comments keep an idle connection open while the model thinks. If the
+caller disconnects mid-answer the upstream generation is aborted, the turn is
+recorded as `client_disconnected`, and no usage is reported — a closed panel is
+not a billable answer.
 
 ### `GET /health` · `GET /capabilities`
 
@@ -153,7 +174,7 @@ npm run dev
 ```
 
 ```bash
-npm test        # 19 security + behaviour tests
+npm test        # security, contract, planner and reliability suites
 npm run lint
 ```
 
@@ -181,18 +202,16 @@ anywhere except the frontend origin.
 Health: `GET /health`. Stateless, so scale horizontally without coordination —
 conversation history is supplied by the caller each turn rather than stored here.
 
+**Third-party data handling is unresolved.** What leaves the service, what stays
+in it, and the questions that need an answer before health-adjacent free text is
+allowed are in [`docs/DATA-POLICY.md`](docs/DATA-POLICY.md).
+
 ## Not built yet
 
 Honest list; none of it is stubbed to look finished.
 
-- **ERP-side verification of `X-Service-Auth`.** This service sends the header on
-  every call; the ERP does not yet check it. Until that lands, the *user* JWT is
-  doing all the authorisation work (which is the part that matters for tenancy)
-  and the service secret is not yet an enforced second factor.
-- **Frontend integration.** No "Ask AI" entry on the client profile yet.
 - **Write actions** and the confirm-before-execute flow.
 - **Feedback** (👍/👎) and the evaluation harness.
-- **Streaming.** Non-streaming first, deliberately.
 - **Assessment history**, needed for "what changed since the last assessment?" —
   `/snapshot` returns latest-only, and no history endpoint was found in the ERP.
 

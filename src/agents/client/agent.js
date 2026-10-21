@@ -1,9 +1,8 @@
 'use strict';
 // The Client Agent orchestrator.
 //
-//   question ─▶ authorise client ─▶ plan tools ─▶ run tools ─▶ fence results
-//                                                                    │
-//                        structured answer ◀─ model ◀─ build prompt ◀─┘
+//   question ─▶ authorise client ─▶ entitlement ─▶ plan tools ─▶ run tools
+//            ─▶ fence results ─▶ build prompt ─▶ model ─▶ structured answer
 //
 // The order matters and is the security design, not a style choice:
 //
@@ -13,6 +12,12 @@
 //   nothing about that client in a prompt. §13's "client context is not
 //   authorisation" is enforced by this being step one rather than a check
 //   somewhere in the middle.
+//
+//   THEN ENTITLEMENT. `ai_suite` is the ERP's own feature flag for this surface.
+//   The quota below is a LIMIT, not an entitlement: a studio under its allowance
+//   would never be refused, so a plan that excludes the AI suite could spend the
+//   shared model account indefinitely. Fail closed — an unreadable flag is not a
+//   "yes"; a denial is not a quota answer.
 //
 //   FENCE BEFORE PROMPTING. Tool output is wrapped as untrusted data
 //   (platform/context/untrusted.js) before it is anywhere near the system
@@ -48,6 +53,18 @@ async function authoriseClient({ clientId, erp, userToken, requestId }) {
     // Unknown-ROUTE 404s never reach here — they belong to this service's own
     // router — so remap is safe and gives the FE a dedicated code (WIRE-01 req.8).
     const code = result.code === 'NOT_FOUND' ? 'CLIENT_NOT_FOUND' : result.code;
+    // A half-configured deploy is neither an outage nor a client denial: the
+    // ERP has no SERVICE_AUTH_SECRET to check us against, so every forwarded
+    // call is refused. Name it, or the panel says "try again shortly" forever
+    // (audit P1-3).
+    if (code === 'SERVICE_AUTH_NOT_CONFIGURED') {
+      return {
+        ok: false,
+        status: 503,
+        code,
+        message: 'The AI service is not authorised by the backend. Please contact your administrator.',
+      };
+    }
     return { ok: false, ...result, code };
   }
   // The ERP shape is { data: {...} } on pt-os routes; tolerate both.
@@ -82,6 +99,49 @@ function buildMessages({ system, contextBlock, history, question }) {
 }
 
 function createClientAgent({ config, erp, router, ledger }) {
+  /**
+   * The studio-entitlement gate (audit P1-2). `ai_suite` is the ERP's feature
+   * flag for this surface, and the ERP already gates its own /api/ai routes on
+   * it — this closes the second door, the one that spends model tokens.
+   *
+   * Fail closed on purpose: the quota gate may run in `monitor` mode, but an
+   * entitlement that cannot be read is never a "yes". The one exception is a
+   * missing key, which means the ERP answered a different question (a token
+   * with no studio gets `{}`), so it is treated as unverified rather than off.
+   */
+  async function checkEntitlement({ userToken, requestId }) {
+    const unverified = {
+      ok: false,
+      status: 503,
+      code: 'ENTITLEMENT_UNVERIFIED',
+      message: 'The assistant cannot verify whether your studio has AI access right now. Please try again shortly.',
+    };
+
+    let map;
+    try {
+      const { data } = await erp.get('/api/features', { userToken, requestId });
+      map = data?.data ?? data;
+    } catch (err) {
+      logger.warn({ requestId, code: err?.code, status: err?.status }, 'client_agent_entitlement_unverifiable');
+      return unverified;
+    }
+
+    if (typeof map?.ai_suite !== 'boolean') {
+      logger.warn({ requestId, has_map: Boolean(map) }, 'client_agent_entitlement_missing_key');
+      return unverified;
+    }
+
+    if (map.ai_suite === false) {
+      return {
+        ok: false,
+        status: 403,
+        code: 'AI_NOT_ENABLED',
+        message: 'The AI assistant is not enabled for this studio. Please contact your administrator.',
+      };
+    }
+    return { ok: true };
+  }
+
   /**
    * The studio-quota gate (round-2 Phase B). The ERP owns the limit; this is
    * only its enforcement point. In `enforce` mode the check is FAIL-CLOSED:
@@ -160,7 +220,7 @@ function createClientAgent({ config, erp, router, ledger }) {
    *   the CUMULATIVE answer as the model writes it (the frontend parser's
    *   contract), only while the model is generating.
    */
-  async function ask({ clientId, message, history = [], userToken, requestId, onDelta }) {
+  async function ask({ clientId, message, history = [], userToken, requestId, onDelta, signal }) {
     const started = Date.now();
 
     // 1. Authorise. Nothing else happens until this passes.
@@ -180,7 +240,27 @@ function createClientAgent({ config, erp, router, ledger }) {
       };
     }
 
-    // 2. Plan — deterministic, so cheap questions stay cheap.
+    // 2. Entitlement. A studio whose plan excludes `ai_suite` is refused here,
+    //    before tools run or tokens are spent — the client it asked about was
+    //    authorised above, so this is a plan answer, not a tenancy answer.
+    const entitlement = await checkEntitlement({ userToken, requestId });
+    if (!entitlement.ok) {
+      logger.info({ requestId, code: entitlement.code }, 'client_agent_entitlement_blocked');
+      ledger?.record?.({
+        request_id: requestId, agent: 'client',
+        outcome: entitlement.code === 'AI_NOT_ENABLED' ? 'ai_disabled' : 'entitlement_unverified',
+        code: entitlement.code, latency_ms: Date.now() - started,
+      });
+      return {
+        ok: false,
+        status: entitlement.status,
+        code: entitlement.code,
+        message: entitlement.message,
+        toolsUsed: [],
+      };
+    }
+
+    // 3. Plan — deterministic, so cheap questions stay cheap.
     const { tools: planned } = planTools(message);
     const intent = planIntent(message);
 
@@ -189,7 +269,7 @@ function createClientAgent({ config, erp, router, ledger }) {
     const toRun = planned.filter((t) => t !== 'getClientProfile');
     const results = [auth.profile];
 
-    // 3. The quota gate runs BEFORE any model spend (Phase B). It does not
+    // 4. The quota gate runs BEFORE any model spend (Phase B). It does not
     //    gate the tool reads — they are local database reads, not tokens.
     const quota = await checkQuota({ userToken, requestId });
     if (!quota.ok) {
@@ -207,7 +287,7 @@ function createClientAgent({ config, erp, router, ledger }) {
       };
     }
 
-    // 4. Retrieve. In parallel — these are independent reads, and a trainer
+    // 5. Retrieve. In parallel — these are independent reads, and a trainer
     //    mid-session should not wait on them serially.
     const rest = await Promise.all(toRun.map((name) => runTool({
       name, args: { clientId }, erp, userToken, requestId,
@@ -217,7 +297,7 @@ function createClientAgent({ config, erp, router, ledger }) {
     const okResults = results.filter((r) => r.ok);
     const failed = results.filter((r) => !r.ok);
 
-    // 5. Fence, then prompt.
+    // 6. Fence, then prompt.
     const fenceId = newFenceId();
     const contextBlock = buildContextBlock(
       okResults.map((r) => ({ label: r.label, tool: r.tool, data: r.data })),
@@ -232,7 +312,7 @@ function createClientAgent({ config, erp, router, ledger }) {
 
     const messages = buildMessages({ system, contextBlock, history, question: message });
 
-    // 6. Answer. onDelta streams the cumulative answer out while the model
+    // 7. Answer. onDelta streams the cumulative answer out while the model
     //    writes, so an SSE caller shows text as it arrives. The provenance
     //    rides along on the first delta so the caller can emit a factual
     //    `start` event (which tools ran, whose client it is) at that moment.
@@ -247,8 +327,28 @@ function createClientAgent({ config, erp, router, ledger }) {
         intent,
         messages,
         onDelta: onDelta ? (cumulative) => onDelta(cumulative, provenance) : undefined,
+        signal,
       });
     } catch (err) {
+      // The trainer closed the panel mid-answer. There is nobody to deliver a
+      // reply to, and reporting usage would bill a studio for one nobody saw
+      // (audit P1-4).
+      if (err.code === 'AI_ABORTED') {
+        logger.info({ requestId }, 'client_agent_client_disconnected');
+        ledger?.record?.({
+          request_id: requestId, agent: 'client', outcome: 'client_disconnected',
+          code: 'CLIENT_DISCONNECTED', latency_ms: Date.now() - started,
+          tools_run: okResults.length, tools_failed: failed.length,
+        });
+        return {
+          ok: false,
+          status: 499,
+          code: 'CLIENT_DISCONNECTED',
+          message: 'The request was cancelled.',
+          toolsUsed: okResults.map((r) => r.tool),
+        };
+      }
+
       const attempts = attemptsOf(err);
       logger.error({ requestId, code: err.code }, 'client_agent_model_failed');
       ledger?.record?.({

@@ -58,6 +58,9 @@ function credentialFrom(req) {
 
 /** Parse failures map to the error event, then the stream closes. */
 function sseWrite(res, event, data) {
+  // A caller that hung up leaves a destroyed socket behind; writing to it
+  // raises asynchronously and would surface as an unhandled 'error' (P1-4).
+  if (res.writableEnded || res.destroyed) return;
   // Two addressing conventions at once, on purpose: `event:` for generic SSE
   // consumers, and a `type` field inside the payload because that is the
   // contract the frontend parser actually keys on (same shape as the ERP's
@@ -90,8 +93,19 @@ function createClientAgentRouter({ agent }) {
 
     const { clientId, message, history } = parsed.data;
 
+    // A caller that navigates away aborts the upstream generation instead of
+    // paying for an answer nobody will read (audit P1-4). `close` fires on
+    // normal completion too, so it only counts when the response did not end.
+    const controller = new AbortController();
+    res.on('close', () => { if (!res.writableEnded) controller.abort(); });
+
     try {
-      const result = await agent.ask({ clientId, message, history, userToken, requestId });
+      const result = await agent.ask({
+        clientId, message, history, userToken, requestId, signal: controller.signal,
+      });
+
+      // Nobody left to answer (audit P1-4).
+      if (res.destroyed) return undefined;
 
       if (!result.ok) {
         return res.status(result.status).json({
@@ -159,14 +173,21 @@ function createClientAgentRouter({ agent }) {
       'X-Accel-Buffering': 'no',
     });
 
-    const heartbeat = setInterval(() => res.write(': ping\n\n'), 15_000);
+    const heartbeat = setInterval(() => {
+      if (!res.writableEnded && !res.destroyed) res.write(': ping\n\n');
+    }, 15_000);
     let sentStart = false;
     let sentChars = 0;
     let lastContent = '';
 
+    // The trainer closed the panel: abort the model call and let the agent
+    // record the turn as cancelled rather than reporting usage (audit P1-4).
+    const controller = new AbortController();
+    res.on('close', () => { if (!res.writableEnded) controller.abort(); });
+
     const finish = () => {
       clearInterval(heartbeat);
-      res.end();
+      if (!res.writableEnded && !res.destroyed) res.end();
     };
 
     try {
@@ -176,6 +197,7 @@ function createClientAgentRouter({ agent }) {
         history,
         userToken,
         requestId,
+        signal: controller.signal,
         onDelta(cumulative, provenance) {
           lastContent = cumulative;
           if (!sentStart) {

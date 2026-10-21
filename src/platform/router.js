@@ -37,12 +37,12 @@ function createRouter({ config, provider }) {
   // Every model attempt — primary success, fallback success or both failures —
   // is recorded so the usage ledger can account for what was actually spent
   // (MPS-01), including the request that produced NO answer at all.
-  async function chat({ intent = 'analysis', messages, temperature, maxTokens, onDelta }) {
+  async function chat({ intent = 'analysis', messages, temperature, maxTokens, onDelta, signal }) {
     const { model, tier } = resolveModel(config, intent);
     const attempts = [];
 
     try {
-      const out = await provider.generate({ model, messages, temperature, maxTokens, onDelta });
+      const out = await provider.generate({ model, messages, temperature, maxTokens, onDelta, signal });
       attempts.push({ model: out.model || model, ok: true, usage: out.usage ?? null, usageKnown: inferUsageKnown(out), latency_ms: out.latency_ms ?? 0 });
       return { ...out, intent, tier, used_fallback: false, attempts };
     } catch (primaryErr) {
@@ -50,11 +50,15 @@ function createRouter({ config, provider }) {
       attempts.push({ model, ok: false, code: primaryErr.code || 'AI_FAILED', latency_ms: 0 });
       attachAttempts(primaryErr, attempts);
 
+      // A caller that hung up is not a provider fault, and starting the
+      // fallback would answer a question nobody is waiting for (audit P1-4).
+      if (primaryErr.code === 'AI_ABORTED') throw primaryErr;
+
       if (config.AI_FALLBACK_MODEL === model) throw primaryErr;
 
       try {
         const out = await provider.generate({
-          model: config.AI_FALLBACK_MODEL, messages, temperature, maxTokens, onDelta,
+          model: config.AI_FALLBACK_MODEL, messages, temperature, maxTokens, onDelta, signal,
         });
         logger.info({ fallback: config.AI_FALLBACK_MODEL, intent }, 'ai_fallback_success');
         attempts.push({ model: out.model || config.AI_FALLBACK_MODEL, ok: true, usage: out.usage ?? null, usageKnown: inferUsageKnown(out), latency_ms: out.latency_ms ?? 0 });
