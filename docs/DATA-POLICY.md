@@ -70,3 +70,21 @@ are out of scope here.
 4. **Record the answer here.** Whoever resolves the table writes the source
    (document, section, date) next to it. Until then, this file is the record
    that the question is open — not that it was answered.
+
+## Questions to put to whoever holds the OpenRouter account
+
+Copy this as one message; each line maps to a row above.
+
+1. For this account, what is the retention period for prompts and completions,
+   and can it be set to zero?
+2. Are prompts or completions used to train models — by OpenRouter itself, or
+   by the upstream provider a request is routed to? Does that differ between
+   `:free` and paid endpoints?
+3. Which upstream providers can serve `openai/gpt-oss-120b:free` and
+   `nvidia/nemotron-3-ultra-550b-a55b:free`, and which sub-processors and
+   regions may process the data?
+4. Is a data-processing agreement available, and does it cover health data?
+
+Record the reply next to the table above with its source — document title and
+section, or the account setting it came from. "Support said it is fine" is not
+a source that survives an audit.
