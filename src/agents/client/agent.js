@@ -220,7 +220,7 @@ function createClientAgent({ config, erp, router, ledger }) {
    *   the CUMULATIVE answer as the model writes it (the frontend parser's
    *   contract), only while the model is generating.
    */
-  async function ask({ clientId, message, history = [], userToken, requestId, onDelta }) {
+  async function ask({ clientId, message, history = [], userToken, requestId, onDelta, signal }) {
     const started = Date.now();
 
     // 1. Authorise. Nothing else happens until this passes.
@@ -327,8 +327,28 @@ function createClientAgent({ config, erp, router, ledger }) {
         intent,
         messages,
         onDelta: onDelta ? (cumulative) => onDelta(cumulative, provenance) : undefined,
+        signal,
       });
     } catch (err) {
+      // The trainer closed the panel mid-answer. There is nobody to deliver a
+      // reply to, and reporting usage would bill a studio for one nobody saw
+      // (audit P1-4).
+      if (err.code === 'AI_ABORTED') {
+        logger.info({ requestId }, 'client_agent_client_disconnected');
+        ledger?.record?.({
+          request_id: requestId, agent: 'client', outcome: 'client_disconnected',
+          code: 'CLIENT_DISCONNECTED', latency_ms: Date.now() - started,
+          tools_run: okResults.length, tools_failed: failed.length,
+        });
+        return {
+          ok: false,
+          status: 499,
+          code: 'CLIENT_DISCONNECTED',
+          message: 'The request was cancelled.',
+          toolsUsed: okResults.map((r) => r.tool),
+        };
+      }
+
       const attempts = attemptsOf(err);
       logger.error({ requestId, code: err.code }, 'client_agent_model_failed');
       ledger?.record?.({

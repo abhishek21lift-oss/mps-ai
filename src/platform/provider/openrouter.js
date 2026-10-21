@@ -26,11 +26,32 @@ function createOpenRouterProvider({ config, fetchImpl = globalThis.fetch }) {
    * sent none, with `usageKnown: false`. Estimation happens one layer up, where
    * it can be labelled.
    */
-  async function generate({ model, messages, temperature = 0.3, maxTokens = 1200, timeoutMs, onDelta }) {
+  async function generate({ model, messages, temperature = 0.3, maxTokens = 1200, timeoutMs, onDelta, signal }) {
     const controller = new AbortController();
     const limit = timeoutMs || config.AI_REQUEST_TIMEOUT_MS;
     const timer = setTimeout(() => controller.abort(), limit);
     const started = Date.now();
+
+    // ONE abort path (audit P1-4): the timeout and the caller (a trainer who
+    // closed the panel) both abort this controller, so there is no second
+    // controller to keep in step. `signal.aborted` tells them apart later.
+    const relayAbort = () => controller.abort();
+    if (signal) {
+      if (signal.aborted) controller.abort();
+      else signal.addEventListener('abort', relayAbort, { once: true });
+    }
+    const release = () => {
+      clearTimeout(timer);
+      if (signal) signal.removeEventListener('abort', relayAbort);
+    };
+
+    /** Timeout or cancellation? The caller's signal is the authority. */
+    const abortedError = () => {
+      const cancelled = signal?.aborted === true;
+      const e = new Error(cancelled ? 'Model request cancelled' : 'Model request timed out');
+      e.code = cancelled ? 'AI_ABORTED' : 'AI_TIMEOUT';
+      return e;
+    };
 
     let res;
     try {
@@ -47,15 +68,15 @@ function createOpenRouterProvider({ config, fetchImpl = globalThis.fetch }) {
         signal: controller.signal,
       });
     } catch (err) {
-      clearTimeout(timer);
-      const timedOut = err?.name === 'AbortError';
-      const e = new Error(timedOut ? 'Model request timed out' : 'Model request failed');
-      e.code = timedOut ? 'AI_TIMEOUT' : 'AI_UNREACHABLE';
+      release();
+      if (err?.name === 'AbortError') throw abortedError();
+      const e = new Error('Model request failed');
+      e.code = 'AI_UNREACHABLE';
       throw e;
     }
 
     if (!res.ok) {
-      clearTimeout(timer);
+      release();
       // The body can echo the request, and the request carries the system
       // prompt — logged at debug only, never at the error the operator reads.
       const e = new Error(`Model provider responded ${res.status}`);
@@ -132,11 +153,7 @@ function createOpenRouterProvider({ config, fetchImpl = globalThis.fetch }) {
     } catch (err) {
       if (err?.code) throw err; // our own typed errors propagate untouched
       // A read that died or was aborted by the (still-live) timer.
-      if (err?.name === 'AbortError') {
-        const e = new Error('Model request timed out');
-        e.code = 'AI_TIMEOUT';
-        throw e;
-      }
+      if (err?.name === 'AbortError') throw abortedError();
       if (process.env.NODE_ENV !== 'test') {
         logger.warn({ errMsg: err?.message }, 'ai_stream_read_failed');
       }
@@ -144,7 +161,7 @@ function createOpenRouterProvider({ config, fetchImpl = globalThis.fetch }) {
       e.code = 'AI_STREAM_FAILED';
       throw e;
     } finally {
-      clearTimeout(timer);
+      release();
     }
   }
 

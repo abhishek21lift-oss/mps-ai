@@ -25,6 +25,12 @@
 // know", and the model is told which tools ran so it can say what it lacked.
 
 const RULES = [
+  // Methodology, policy and protocol questions are about the STUDIO, not the
+  // client: answer them from the approved corpus (audit P1-1). First, because a
+  // "policy on X" question must not lose its only knowledge read to the cap.
+  { re: /\b(policy|protocol|method|guideline|standard|procedure|sop|rule)\b/i,
+    tools: ['search_knowledge'] },
+
   // Money and package status.
   { re: /\b(package|expir|renew|subscription|validity|valid till|end date|kab tak|khatam)\b/i,
     tools: ['getClientProfile', 'getClientSubscriptions'] },
