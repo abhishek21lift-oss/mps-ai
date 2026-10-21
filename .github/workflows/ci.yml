@@ -2,9 +2,12 @@ name: CI — Lint · Test
 
 on:
   push:
-    branches: [main, staging]
+    # The repo has no `main`/`staging`: the integration branch is the default
+    # branch below (it consumed ai-remediation-phase-1 via PR #2). If the
+    # default branch is ever renamed to `main`, update both filters to match.
+    branches: [claude/session-01dcjf1c88rf5nfdukc-o1vv0m-5l89cs]
   pull_request:
-    branches: [main]
+    branches: [claude/session-01dcjf1c88rf5nfdukc-o1vv0m-5l89cs]
   # Landed via app/bot token? GitHub skips `push` triggers for those (see the
   # backend repo's ci.yml for the full reasoning). This is the manual re-run.
   workflow_dispatch:
