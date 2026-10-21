@@ -347,6 +347,42 @@ describe('§51.11 — switching client does not carry the previous one across', 
   });
 });
 
+describe('§51.12 — replayed assistant history is neutralised without being destroyed', () => {
+  test('a past assistant turn reaches the model as itself, not as fence debris', async () => {
+    const erp = fakeErp(async (path) => {
+      const name = path.includes('c-priya') ? 'Priya' : 'Rahul';
+      return path.endsWith('/snapshot')
+        ? { data: { who: name }, latency_ms: 1 }
+        : { data: { data: { name } }, latency_ms: 1 };
+    });
+    const { app, provider } = appWith(erp);
+
+    await post(app, { clientId: 'c-priya', message: 'summary' });
+    // The ASSISTANT turn must replay verbatim: no model receives
+    // [fence-removed]R[fence-removed]a[fence-removed]h… debris, so the
+    // conversation keeps its memory and the prompt does not inflate ~13x.
+    const res = await post(app, {
+      clientId: 'c-priya',
+      message: 'what did she weigh?',
+      history: [
+        { role: 'user', content: 'how much does Rahul weigh?' },
+        { role: 'assistant', content: 'Rahul weighs 78.4 kg.' },
+      ],
+    });
+
+    expect(res.status).toBe(200);
+    const messages = provider.seen[1].messages;
+    const assistant = messages.find((m) => m.role === 'assistant');
+    expect(assistant).toBeDefined();
+    expect(assistant.content).toBe('Rahul weighs 78.4 kg.');
+    // The user turn replays unchanged as well.
+    const user = messages.find((m) => m.role === 'user' && m.content.includes('how much does Rahul weigh?'));
+    expect(user).toBeDefined();
+    // And the debris pattern must never be emitted for plain content.
+    expect(JSON.stringify(messages)).not.toContain('[fence-removed]R');
+  });
+});
+
 describe('§47 — CORS is an allow-list', () => {
   test('an unlisted origin is rejected', async () => {
     const erp = fakeErp(async () => ({ data: {}, latency_ms: 1 }));

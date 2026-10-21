@@ -1,0 +1,50 @@
+name: CI — Lint · Test
+
+on:
+  push:
+    branches: [main, staging]
+  pull_request:
+    branches: [main]
+  # Landed via app/bot token? GitHub skips `push` triggers for those (see the
+  # backend repo's ci.yml for the full reasoning). This is the manual re-run.
+  workflow_dispatch:
+
+# Cancel in-progress runs on the same branch to save CI minutes
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# One job, hermetic by design. mps-ai stands on NO external services: its
+# tests use a fake ERP adapter and a fake model provider (both construct the
+# real buildApp), so unlike the backend's CI there is no postgres/redis
+# service here — adding one would only make this slower while proving less.
+#
+# The suite that runs includes the security contract (security.test.js) and
+# the untrusted-context regression class from the 2026-10 history-replay fix
+# (untrusted.test.js + security.test.js §51.12) — jest's testMatch picks up
+# everything under __tests__/*.test.js, so there is no list to keep in sync.
+jobs:
+  test:
+    name: Lint and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Node 22 — matches the backend's CI family. The engines floor is 20
+      # (the Dockerfile pins node:20-alpine); CI on the newer LTS catches
+      # deprecations a 20-only runner would hide.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        # Same policy as the backend: the backlog is at zero, so any new
+        # warning fails CI instead of being absorbed.
+        run: npm run lint -- --max-warnings=0
+
+      - name: Test
+        run: npm test
