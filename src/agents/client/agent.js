@@ -139,7 +139,11 @@ function createClientAgent({ config, erp, router, ledger }) {
   function reportUsage({ userToken, requestId, payload }) {
     if (!erp.post) return; // test fakes without a post method just skip it
     erp.post('/api/ai/usage/service/ingest', payload, { userToken, requestId })
-      .catch((err) => logger.debug({ requestId, code: err?.code }, 'usage_ingest_failed'));
+      // Phase 4E: a failed report degrades bookkeeping, never the answer — but
+      // it must be observable. `debug` was invisible in production's log
+      // level, so an ERP outage dropped every ingest without a trace. `warn`
+      // names the event and the code, no prompt content, no tokens.
+      .catch((err) => logger.warn({ requestId, code: err?.code, status: err?.status }, 'usage_ingest_failed'));
   }
 
   /** Attempts summary for the ledger and the ERP report. */

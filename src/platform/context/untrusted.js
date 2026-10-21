@@ -56,7 +56,11 @@ function neutralise(text, fenceId) {
   return String(text)
     // The literal fence, however it is spelled or spaced.
     .replace(new RegExp(`<\\/?\\s*untrusted[^>]*>`, 'gi'), '[fence-removed]')
-    .replace(new RegExp(fenceId, 'g'), '[fence-removed]')
+    // An ABSENT fence id means there is no fence id to hunt, not
+    // "match at every position" — new RegExp('', 'g') would shred the text,
+    // which destroyed replayed assistant history via agent.js (the only
+    // un-fenced neutralise call site).
+    .replace(fenceId ? new RegExp(fenceId, 'g') : /\x00/, '[fence-removed]')
     // Chat-template role markers. A note containing "<|im_start|>system" or a
     // bare "system:" line is trying to open a turn it is not entitled to.
     .replace(/<\|[^|>]*\|>/g, '[marker-removed]')

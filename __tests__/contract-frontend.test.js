@@ -319,6 +319,35 @@ describe('MPS-01 — the studio quota gate', () => {
       .send({ clientId: 'c-1', message: 'summary' }));
     expect(erp.calls.some((c) => c.path === '/api/ai/usage/service/quota')).toBe(false);
   });
+
+  test('enforce mode defers to the ERP switch: enforcement_enabled:false proceeds even when over', async () => {
+    // The kill switch is the ERP's, not the service's. A studio the operator
+    // turned enforcement off for must NOT be cut off by this service's mode.
+    const enforceCfg = load({ ...BASE_ENV, AI_QUOTA_MODE: 'enforce' });
+    const erp = quotaErp({ over: true, enforcement_enabled: false, tokens_used: 2_000_000, limit: 1_000_000, used_pct: 200 });
+    const provider = streamingProvider();
+    const app = appWith(erp, provider, enforceCfg);
+    const res = await withCookie(request(app).post('/ai/client-agent/chat')
+      .send({ clientId: 'c-1', message: 'summary' }));
+    expect(res.status).toBe(200);
+    expect(provider.seen).toHaveLength(1);
+  });
+
+  test('monitor mode proceeds even when the quota probe itself errors', async () => {
+    const erp = fakeErp(async (p) => {
+      if (p === '/api/ai/usage/service/quota') {
+        const e = new Error('ERP responded 503'); e.code = 'ERP_DENIED'; throw e;
+      }
+      if (p.endsWith('/snapshot')) return { data: {}, latency_ms: 1 };
+      return { data: { data: { name: 'X' } }, latency_ms: 1 };
+    });
+    const provider = streamingProvider();
+    const app = appWith(erp, provider);
+    const res = await withCookie(request(app).post('/ai/client-agent/chat')
+      .send({ clientId: 'c-1', message: 'summary' }));
+    expect(res.status).toBe(200);
+    expect(provider.seen).toHaveLength(1); // monitoring blindness never stops the answer
+  });
 });
 
 // ── MPS-01: usage ledger + ERP ingest report ──────────────────────────────────
