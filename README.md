@@ -189,18 +189,21 @@ See `.env.example`. Required: `AI_API_KEY`, `ERP_BACKEND_URL`,
 
 ## Deployment
 
-Independently deployable; no database, no migrations, no shared volume.
+Automatic: every green CI run on the default branch is deployed to the VPS by
+`.github/workflows/deploy.yml`. The deploy refuses to report success unless
+`GET /health` names the commit it just built, and rolls back the previous image
+when it does not. See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for the required
+repository secrets, the box environment, manual rollback, and the one-time nginx
+route.
 
-```bash
-NODE_ENV=production node src/server.js
-```
+Independently deployable; no database, no migrations, no shared volume. Behind
+the existing reverse proxy, alongside the ERP. It needs egress to the model
+provider and to `ERP_BACKEND_URL`; it needs no inbound access from anywhere
+except the frontend origin.
 
-Behind the existing reverse proxy, alongside the ERP. It needs egress to the
-model provider and to `ERP_BACKEND_URL`; it needs no inbound access from
-anywhere except the frontend origin.
-
-Health: `GET /health`. Stateless, so scale horizontally without coordination —
-conversation history is supplied by the caller each turn rather than stored here.
+Health: `GET /health` → `{status, service, sha}`. Stateless, so scale
+horizontally without coordination — conversation history is supplied by the
+caller each turn rather than stored here.
 
 **Third-party data handling is unresolved.** What leaves the service, what stays
 in it, and the questions that need an answer before health-adjacent free text is

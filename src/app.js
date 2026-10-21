@@ -46,7 +46,15 @@ function buildApp({ config, erp, provider }) {
   // §48 — liveness. No config, no secrets, no upstream calls: a health check
   // that fails because OpenRouter is slow tells the orchestrator to restart a
   // process that is working fine.
-  app.get('/health', (_req, res) => res.json({ status: 'ok', service: 'mps-ai' }));
+  //
+  // GIT_SHA is baked in by the Dockerfile. It is what lets a deploy verify it
+  // is serving the commit it just built instead of a cached, older image that
+  // is also perfectly healthy.
+  app.get('/health', (_req, res) => res.json({
+    status: 'ok',
+    service: 'mps-ai',
+    sha: process.env.GIT_SHA || 'unknown',
+  }));
 
   // Capability discovery (§37). Names and summaries only — the endpoints they
   // map to are internal, and publishing them would just be a map of the ERP.

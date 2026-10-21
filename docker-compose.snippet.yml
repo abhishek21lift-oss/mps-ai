@@ -1,3 +1,17 @@
+# SUPERSEDED — do not paste this into the live compose file.
+#
+# The AI service is now deployed as its own Compose project by
+# deploy/deploy-ai.sh using deploy/compose.ai.yml (see docs/DEPLOYMENT.md and
+# .github/workflows/deploy.yml). That file attaches to the ERP network and is
+# versioned; this snippet required a manual paste into
+# /opt/myptstudio/docker-compose.yml, which is exactly the step that left the
+# service undeployed.
+#
+# Kept as the reference for the environment contract (names and meanings). Any
+# variable added here must also be added to deploy/compose.ai.yml.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+#
 # Paste this `ai` service into the compose file that actually runs on the VPS:
 #
 #   /opt/myptstudio/619-erp-backend/docker-compose.yml
