@@ -30,6 +30,9 @@ function fakeErp(handler) {
     calls,
     get: async (path, { userToken, requestId }) => {
       calls.push({ path, userToken, requestId });
+      // Entitlement is a prerequisite for every turn (audit P1-2); tests about
+      // anything else should not have to restate it.
+      if (path === '/api/features') return { data: { data: { ai_suite: true } }, latency_ms: 1 };
       return handler(path, userToken);
     },
   };

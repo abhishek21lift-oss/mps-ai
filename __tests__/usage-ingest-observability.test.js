@@ -33,6 +33,8 @@ const BASE_ENV = {
 function fakeErp({ ingestFails = false } = {}) {
   return {
     get: async (p) => {
+      // Entitlement is a prerequisite for every turn (audit P1-2).
+      if (p === '/api/features') return { data: { data: { ai_suite: true } }, latency_ms: 1 };
       if (p === '/api/ai/usage/service/quota') return { data: { data: { over: false, enforcement_enabled: false } }, latency_ms: 1 };
       if (p.endsWith('/snapshot')) return { data: {}, latency_ms: 1 };
       return { data: { data: { name: 'X' } }, latency_ms: 1 };
