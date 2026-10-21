@@ -53,6 +53,18 @@ async function authoriseClient({ clientId, erp, userToken, requestId }) {
     // Unknown-ROUTE 404s never reach here — they belong to this service's own
     // router — so remap is safe and gives the FE a dedicated code (WIRE-01 req.8).
     const code = result.code === 'NOT_FOUND' ? 'CLIENT_NOT_FOUND' : result.code;
+    // A half-configured deploy is neither an outage nor a client denial: the
+    // ERP has no SERVICE_AUTH_SECRET to check us against, so every forwarded
+    // call is refused. Name it, or the panel says "try again shortly" forever
+    // (audit P1-3).
+    if (code === 'SERVICE_AUTH_NOT_CONFIGURED') {
+      return {
+        ok: false,
+        status: 503,
+        code,
+        message: 'The AI service is not authorised by the backend. Please contact your administrator.',
+      };
+    }
     return { ok: false, ...result, code };
   }
   // The ERP shape is { data: {...} } on pt-os routes; tolerate both.

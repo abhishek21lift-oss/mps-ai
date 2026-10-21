@@ -55,6 +55,20 @@ class ErpError extends Error {
 /** Statuses the caller must see unchanged rather than have translated. */
 const PASSTHROUGH_STATUS = new Set([401, 403, 404, 429]);
 
+/**
+ * The ERP names some refusals in the body. Only one changes our answer: a
+ * deploy that has no SERVICE_AUTH_SECRET. Every other code keeps the status-
+ * based mapping, so existing callers see exactly what they saw before.
+ */
+async function bodyErrorCode(res) {
+  try {
+    const body = await res.json();
+    return body?.error?.code ?? null;
+  } catch {
+    return null;
+  }
+}
+
 function createErpClient({ config, fetchImpl = globalThis.fetch }) {
   const base = config.ERP_BACKEND_URL.replace(/\/+$/, '');
 
@@ -130,9 +144,12 @@ function createErpClient({ config, fetchImpl = globalThis.fetch }) {
       // assistant report an outage where the truth is an authorisation result.
       const status = PASSTHROUGH_STATUS.has(res.status) ? res.status : 502;
       logger.info({ endpoint: path, status: res.status, latency_ms, requestId }, 'erp_non_ok');
+      const erpCode = await bodyErrorCode(res);
       throw new ErpError(`ERP responded ${res.status}`, {
         status,
-        code: res.status === 404 ? 'NOT_FOUND' : res.status === 429 ? 'RATE_LIMITED' : 'ERP_DENIED',
+        code: erpCode === 'SERVICE_AUTH_NOT_CONFIGURED'
+          ? erpCode
+          : res.status === 404 ? 'NOT_FOUND' : res.status === 429 ? 'RATE_LIMITED' : 'ERP_DENIED',
         endpoint: path,
       });
     }
