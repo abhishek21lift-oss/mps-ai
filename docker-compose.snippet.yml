@@ -1,68 +1,16 @@
-# Paste this `ai` service into the compose file that actually runs on the VPS:
+# RETIRED 2026-10-22 — DO NOT DEPLOY.
 #
-#   /opt/myptstudio/619-erp-backend/docker-compose.yml
+# The standalone `mps-ai` service is no longer part of the production topology.
+# The Client Assistant runs in the ERP backend at:
 #
-# It is a SNIPPET, not a standalone file — the AI service belongs on the same
-# compose network as the API so it can reach it as `http://api:5000` without
-# leaving the box. Running it in its own compose project would put it on a
-# separate network and force the ERP call out through nginx and back, adding a
-# TLS round trip and a public hop for traffic that never needs to leave the host.
+#   POST /api/ai/client-agent/chat/stream
 #
-# Follow the same rule the backend's own compose file states: the live file is
-# on the box and may already differ. Diff before pasting.
+# The `/ai/` nginx route, `AI_SERVICE_URL`, the service-attestation header and
+# the quota/usage bridge were removed. Deploying this service now would call
+# backend endpoints that no longer exist.
 #
-# ROUTE DOCTRINE: the browser reaches this service as the same origin
-# myptstudio.com/ai/* via nginx (infra/nginx/myptstudio.conf, location /ai/).
-# The frontend's AI_SERVICE_URL rewrite in next.config.js is the alternative
-# for deploys that cannot adopt that vhost — never enable both at once.
-
-services:
-  ai:
-    build: /opt/myptstudio/mps-ai        # adjust to wherever you clone it
-    restart: unless-stopped
-    # Loopback only, exactly like `api` and the frontend. nginx is the only
-    # route in. Do not "fix" a connection problem by binding 0.0.0.0.
-    ports:
-      - '127.0.0.1:4100:4100'
-    environment:
-      NODE_ENV: production
-      PORT: '4100'
-      LOG_LEVEL: ${AI_LOG_LEVEL:-info}
-
-      AI_PROVIDER: openrouter
-      # Reuse the key the ERP already uses — one OpenRouter account, one bill.
-      # Required: without it the first question is a 401, not a boot failure.
-      AI_API_KEY: ${OPENROUTER_API_KEY:?OPENROUTER_API_KEY is required by the AI service}
-      AI_PRIMARY_MODEL: ${AI_PRIMARY_MODEL:-openai/gpt-oss-120b:free}
-      AI_FALLBACK_MODEL: ${AI_FALLBACK_MODEL:-nvidia/nemotron-3-ultra-550b-a55b:free}
-
-      # `api` is the service name on the compose network. Container-to-container,
-      # so this never touches nginx or the public internet.
-      ERP_BACKEND_URL: http://api:5000
-      # Required, and it must be the SAME string as the ERP's own
-      # SERVICE_AUTH_SECRET. Left blank it used to start and answer 503 on
-      # every internal call, which read like an outage; compose now refuses.
-      SERVICE_AUTH_SECRET: ${SERVICE_AUTH_SECRET:?SERVICE_AUTH_SECRET is required and must equal the ERP's}
-
-      # Exact origins. The browser never calls the container directly — its
-      # traffic arrives through nginx (myptstudio.com location /ai/, see
-      # infra/nginx/myptstudio.conf) — but nginx forwards the browser's Origin
-      # header untouched, so this must still list the frontend's real
-      # scheme+host. A 403 from mps-ai with the route wired is this list
-      # missing the origin.
-      ALLOWED_ORIGINS: ${AI_ALLOWED_ORIGINS:?AI_ALLOWED_ORIGINS is required (the frontend's scheme+host, e.g. https://myptstudio.com)}
-      RATE_LIMIT_MAX: ${AI_RATE_LIMIT_MAX:-30}
-
-      # NOTE: no DATABASE_URL and no JWT_SECRET here, and adding them will make
-      # the container refuse to start. That is deliberate — see src/config.js.
-    # The default ledger path is logs/usage.jsonl inside /app. Without this
-    # volume a restart drops the only local audit trail of AI spend.
-    volumes:
-      - ai-logs:/app/logs
-    depends_on:
-      api:
-        condition: service_started
-
-# Add this to the target file's top-level `volumes:` block as well (once).
-volumes:
-  ai-logs:
+# The source repository is retained for historical reference and its provider
+# privacy tests, not as a deployable service. If an `ai` or `mps-ai` container
+# is still running on the VPS, use:
+#
+#   619-erp-backend/docs/AI-CLIENT-ASSISTANT-CUTOVER.md

@@ -1,5 +1,14 @@
 # MY PT STUDIO AI
 
+> **RETIRED 2026-10-22 — DO NOT DEPLOY.** The Client Assistant now runs in the
+> ERP backend at `POST /api/ai/client-agent/chat/stream`, under the studio's
+> `ai_suite` gate, trainer auth, rate limiter and quota. The `/ai/` nginx route,
+> `AI_SERVICE_URL`, `SERVICE_AUTH_SECRET`/`X-Service-Auth` bridge, and the
+> quota/usage service endpoints are gone. This repository is retained as
+> historical source and for its provider privacy patch/tests; the deployment
+> instructions below describe the retired topology. See
+> `619-erp-backend/docs/AI-CLIENT-ASSISTANT-CUTOVER.md`.
+
 The intelligence layer for MY PT STUDIO. Independently deployable, and
 deliberately powerless on its own.
 

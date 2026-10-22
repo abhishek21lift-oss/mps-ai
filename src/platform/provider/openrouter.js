@@ -55,6 +55,10 @@ function createOpenRouterProvider({ config, fetchImpl = globalThis.fetch }) {
 
     let res;
     try {
+      // provider.data_collection: OpenRouter retains free-tier prompts for training
+      // unless explicitly opted out. Health data requires operator opt-in via
+      // AI_ALLOW_DATA_COLLECTION=true (case-insensitive). Default is deny.
+      const allowCollection = (process.env.AI_ALLOW_DATA_COLLECTION || '').toLowerCase() === 'true';
       res = await fetchImpl(`${BASE_URL}/chat/completions`, {
         method: 'POST',
         headers: {
@@ -64,7 +68,7 @@ function createOpenRouterProvider({ config, fetchImpl = globalThis.fetch }) {
         },
         // stream+usage: usage rides the final data chunk, so exact tokens are
         // available on streamed responses too (round-1 P1#3, mps-ai side).
-        body: JSON.stringify({ model, messages, temperature, max_tokens: maxTokens, stream: true, usage: { include: true } }),
+        body: JSON.stringify({ model, messages, temperature, max_tokens: maxTokens, stream: true, usage: { include: true }, provider: { data_collection: allowCollection ? 'allow' : 'deny' } }),
         signal: controller.signal,
       });
     } catch (err) {
