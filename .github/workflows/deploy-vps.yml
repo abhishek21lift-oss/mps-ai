@@ -1,0 +1,119 @@
+name: Deploy mps-ai to VPS
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Exact Git branch, tag, or commit SHA already pushed to GitHub"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mps-ai-vps-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Configure SSH
+        shell: bash
+        env:
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          test -n "$VPS_SSH_KEY" || { echo "Missing VPS_SSH_KEY"; exit 1; }
+          test -n "$VPS_KNOWN_HOSTS" || { echo "Missing VPS_KNOWN_HOSTS"; exit 1; }
+          mkdir -p "$HOME/.ssh"
+          printf '%s\n' "$VPS_SSH_KEY" > "$HOME/.ssh/id_ed25519"
+          printf '%s\n' "$VPS_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 700 "$HOME/.ssh"
+          chmod 600 "$HOME/.ssh/id_ed25519" "$HOME/.ssh/known_hosts"
+          ssh-keygen -y -f "$HOME/.ssh/id_ed25519" >/dev/null
+
+      - name: Deploy exact Git ref with rollback
+        shell: bash
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          DEPLOY_REF: ${{ inputs.ref }}
+        run: |
+          set -euo pipefail
+          test -n "$VPS_HOST" || { echo "Missing VPS_HOST"; exit 1; }
+          test -n "$VPS_USER" || { echo "Missing VPS_USER"; exit 1; }
+          [[ "$DEPLOY_REF" =~ ^[A-Za-z0-9._/-]+$ ]] || {
+            echo "Ref contains unsupported characters"; exit 1;
+          }
+
+          printf -v remote_ref '%q' "$DEPLOY_REF"
+          ssh -i "$HOME/.ssh/id_ed25519" \
+            -o IdentitiesOnly=yes \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes \
+            -o ConnectTimeout=10 \
+            "$VPS_USER@$VPS_HOST" "bash -s -- $remote_ref" <<'REMOTE'
+          set -Eeuo pipefail
+          REF="$1"
+          ROOT=/opt/myptstudio
+          REPO="$ROOT/mps-ai"
+          cd "$REPO"
+
+          echo "== Check existing checkout before changing it =="
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "ABORT: /opt/myptstudio/mps-ai has local changes."
+            echo "Commit/push or safely preserve them before deploying a GitHub ref."
+            git status --short
+            exit 20
+          fi
+
+          echo "== Fetch requested ref =="
+          git fetch --no-tags origin "$REF"
+          TARGET="$(git rev-parse --verify 'FETCH_HEAD^{commit}')"
+          echo "Target commit: $TARGET"
+
+          echo "== Preserve current image for rollback =="
+          BACKUP="myptstudio-ai:rollback-$(date -u +%Y%m%dT%H%M%SZ)"
+          docker image inspect myptstudio-ai >/dev/null
+          docker tag myptstudio-ai "$BACKUP"
+
+          echo "== Checkout exact target commit =="
+          git checkout --detach "$TARGET"
+
+          echo "== Build target image =="
+          if ! docker compose -f "$ROOT/docker-compose.yml" build ai; then
+            echo "BUILD FAILED; existing container has not been recreated."
+            exit 21
+          fi
+
+          rollback() {
+            echo "Deployment failed; restoring image $BACKUP"
+            docker tag "$BACKUP" myptstudio-ai
+            docker compose -f "$ROOT/docker-compose.yml" up -d --no-deps --force-recreate ai || true
+          }
+
+          echo "== Recreate AI service only =="
+          if ! docker compose -f "$ROOT/docker-compose.yml" up -d --no-deps --force-recreate ai; then
+            rollback
+            exit 22
+          fi
+
+          echo "== Verify health =="
+          for i in $(seq 1 12); do
+            if curl -fsS --max-time 5 http://127.0.0.1:4100/health; then
+              echo
+              echo "DEPLOY_SUCCESS commit=$TARGET"
+              docker compose -f "$ROOT/docker-compose.yml" ps ai
+              exit 0
+            fi
+            sleep 5
+          done
+
+          rollback
+          echo "DEPLOY_FAILED: health check did not pass; rollback attempted."
+          exit 23
+          REMOTE
